@@ -1,0 +1,254 @@
+# Runs the automated reproduction of issue #45816 against a released build.
+#
+# The run is **green when the issue still reproduces**: the two reproduction
+# tests are `xfail(strict=True)`, so an XPASS — Esc or Enter working after the
+# click — turns the run red instead. A failing control also turns it red, which means the
+# measurement is not trustworthy rather than that the issue is fixed.
+name: Reproduce issue 45816
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [wintegrate-repro-issue-45816]
+
+permissions:
+  contents: read
+
+env:
+  POWERTOYS_VERSION: 0.101.2362.0
+
+jobs:
+  reproduce:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: windows-latest
+            sha256: D56FA7130FA68AFE553068C15A59A6B24C8DBCC9A0989A43EF0FC5A373230DE3
+          - arch: arm64
+            os: windows-11-arm
+            sha256: 4C2AE5156B7E4F1F5BA744BA6E1CF6BFE3D9614978356E6B00AA47CAB86350DB
+    name: "#45816 on ${{ matrix.arch }}"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Things on the arm64 image take the foreground away from whatever is being
+      # driven, and they do it *after* the run has started: the provisioning
+      # daemon spawns a terminal popup every 30 seconds until WSL is there, and
+      # Edge's first-run page appears the first time anything launches a URL. A
+      # test that loses the foreground does not fail with "the foreground was
+      # taken" — it fails with an empty field, a keystroke that went nowhere, or a
+      # palette that never came up.
+      #
+      # This mirrors wintegrate's own `test-arm64` job, which is where the working
+      # version of it lives. The part that matters and is easy to leave out is the
+      # MSI fallback: `wsl --update` alone answers "The Windows Subsystem for
+      # Linux is not installed" and exits 0 on this image, so the popup it was
+      # meant to stop keeps coming. There is nothing to update until WSL exists.
+      - name: Stop the arm64 image stealing the foreground
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath wsl.exe -ArgumentList '--update', '--confirm' `
+            -NoNewWindow -PassThru
+          if (-not $p.WaitForExit(60000)) { $p.Kill(); Write-Host 'wsl --update timed out' }
+
+          # `wsl --status` writes UTF-16, which comes back with interleaved NULs
+          # through a pipe and matches nothing.
+          function Get-WslStatus {
+            $prev = [Console]::OutputEncoding
+            try {
+              [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
+              return ((& wsl.exe --status 2>&1 | Out-String) -replace "\0", '')
+            } finally { [Console]::OutputEncoding = $prev }
+          }
+          $status = Get-WslStatus
+          Write-Host "WSL status: $status"
+          if ($status -match 'not installed') {
+            try {
+              $rel = Invoke-RestMethod 'https://api.github.com/repos/microsoft/WSL/releases/latest'
+              $asset = $rel.assets | Where-Object { $_.name -match 'arm64\.msi$' } | Select-Object -First 1
+              if ($asset) {
+                Write-Host "Downloading $($asset.name)..."
+                Invoke-WebRequest -Uri $asset.browser_download_url -OutFile wsl-arm64.msi
+                Start-Process msiexec -ArgumentList '/i', 'wsl-arm64.msi', '/qn', '/norestart' -Wait
+                Write-Host "WSL status after install: $(Get-WslStatus)"
+              }
+            } catch {
+              Write-Host "WSL MSI fallback skipped: $_"
+            }
+          }
+
+          # Edge's first-run page, in both hives.
+          New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' -Force -ErrorAction SilentlyContinue | Out-Null
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' -Name 'HideFirstRunExperience' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Edge' -Name 'PreventFirstRunPage' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+          New-Item -Path 'HKCU:\SOFTWARE\Policies\Microsoft\Edge' -Force -ErrorAction SilentlyContinue | Out-Null
+          Set-ItemProperty -Path 'HKCU:\SOFTWARE\Policies\Microsoft\Edge' -Name 'HideFirstRunExperience' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+
+          # The OOBE privacy experience, which is a different dialog from Edge's.
+          New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' -Force -ErrorAction SilentlyContinue | Out-Null
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' -Name 'DisablePrivacyExperience' -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+
+          Get-Process -Name 'wsl','wslhost','WindowsTerminal','msedge','msedgewebview2' `
+            -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          # wsl.exe exits non-zero when WSL is absent, and this step is best-effort.
+          $global:LASTEXITCODE = 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install wintegrate
+        run: pip install "wintegrate[video]>=0.5.1" pytest
+
+      - name: Close anything holding the foreground
+        shell: pwsh
+        run: |
+          python -c "
+          import time
+          from wintegrate.interop import (
+              get_foreground_window, get_window_class, get_window_title, user32,
+          )
+          WM_CLOSE = 0x0010
+          for attempt in range(2):
+              hwnd = get_foreground_window()
+              if not hwnd:
+                  continue
+              cls, title = get_window_class(hwnd), get_window_title(hwnd)
+              print(f'pass {attempt}: foreground is class={cls!r} title={title!r}')
+              if cls == 'Windows.UI.Core.CoreWindow':
+                  user32.SendMessageW(hwnd, WM_CLOSE, 0, 0)
+                  print('  sent WM_CLOSE')
+                  time.sleep(3)
+          hwnd = get_foreground_window()
+          print(f'foreground now: {get_window_class(hwnd)!r} {get_window_title(hwnd)!r}')
+          "
+
+      - name: Install PowerToys ${{ env.POWERTOYS_VERSION }}
+        timeout-minutes: 25
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA256: ${{ matrix.sha256 }}
+          # The whole subject, not a substring: a substring match accepts a
+          # different certificate that merely contains the same CN.
+          EXPECTED_SIGNER: "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $asset = "PowerToysUserSetup-$env:POWERTOYS_VERSION-${{ matrix.arch }}.exe"
+          $dir = Join-Path $env:RUNNER_TEMP 'powertoys'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+
+          # Straight from the project's own release, so the provenance needs no
+          # mirror. The bytes are still verified rather than trusted.
+          gh release download "v$env:POWERTOYS_VERSION" --repo microsoft/PowerToys `
+            --pattern $asset --dir $dir
+          if ($LASTEXITCODE -ne 0) { throw "gh release download failed ($LASTEXITCODE)" }
+
+          $setup = Join-Path $dir $asset
+          $hash = (Get-FileHash $setup -Algorithm SHA256).Hash
+          if ($hash -ne $env:EXPECTED_SHA256) {
+            throw "SHA-256 mismatch: got $hash, expected $env:EXPECTED_SHA256"
+          }
+          $sig = Get-AuthenticodeSignature $setup
+          if ($sig.Status -ne 'Valid') { throw "signature is $($sig.Status), not Valid" }
+          if ($sig.SignerCertificate.Subject -ne $env:EXPECTED_SIGNER) {
+            throw "unexpected signer: $($sig.SignerCertificate.Subject)"
+          }
+          Write-Host "sha256 and publisher signature ok"
+
+          # `/silent` — one dash-less slash, the WiX Burn convention. `--silent`
+          # is not a Burn switch: the bootstrapper ignores it, shows its UI, and
+          # then waits forever for a click that is never coming. The flag is the
+          # one winget passes, per the comment in
+          # installer/PowerToysSetupVNext/SilentFilesInUseBA/SilentFilesInUseBAFunctions.cpp.
+          $p = Start-Process -FilePath $setup -ArgumentList '/silent' -PassThru
+          if (-not $p.WaitForExit(20 * 60 * 1000)) {
+            $p.Kill()
+            throw "the installer did not finish within 20 minutes"
+          }
+          Write-Host "installer exit code: $($p.ExitCode)"
+
+          $exe = Join-Path $env:LOCALAPPDATA 'PowerToys\PowerToys.exe'
+          if (-not (Test-Path $exe)) { throw "PowerToys.exe is not at $exe after install" }
+          $installed = (Get-Item $exe).VersionInfo.FileVersion
+          Write-Host "installed: $installed"
+
+      # Command Palette ships as its own MSIX inside PowerToys and is registered
+      # on PowerToys' *first run*, not by the installer. Until that has happened
+      # `Get-AppxPackage Microsoft.CommandPalette` returns nothing and there is
+      # no AUMID to launch, so this waits for the registration rather than
+      # sleeping and hoping.
+      - name: Register Command Palette by starting PowerToys once
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Start-Process -FilePath (Join-Path $env:LOCALAPPDATA 'PowerToys\PowerToys.exe')
+
+          $deadline = (Get-Date).AddMinutes(8)
+          while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 5
+            $pkg = Get-AppxPackage -Name 'Microsoft.CommandPalette' -ErrorAction SilentlyContinue
+            if ($pkg) {
+              Write-Host "registered: $($pkg.Name) $($pkg.Version)"
+              Write-Host "family: $($pkg.PackageFamilyName)"
+              exit 0
+            }
+          }
+          throw "Microsoft.CommandPalette was not registered within 8 minutes"
+
+      # PowerToys' first run opens its Settings window and a "What's new" window,
+      # and those appear *after* the foreground cleanup above has already run.
+      # Command Palette hides itself when it loses focus, so a Settings window
+      # arriving mid-test does not merely sit on top — it dismisses the thing
+      # under test, and the failure reads as "MainSearchBox does not exist".
+      # That is what the first arm64 run of this workflow actually failed on; the
+      # recording showed the Settings "Home" page in the foreground.
+      #
+      # The runner is not needed from here on: Command Palette is registered as
+      # its own MSIX and the test launches it by AUMID.
+      - name: Close PowerToys' own first-run windows
+        shell: pwsh
+        run: |
+          Get-Process -Name 'PowerToys.Settings','PowerToys' -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "stopping $($_.ProcessName) ($($_.Id))"; $_ } |
+            Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 3
+
+          # Whatever else the runner started. CmdPal itself is deliberately not in
+          # this list: the test sweeps and relaunches it, and killing it here would
+          # only make the first launch a cold one twice over.
+          Get-Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.ProcessName -like 'PowerToys.*' } |
+            ForEach-Object { Write-Host "stopping $($_.ProcessName)"; $_ } |
+            Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+
+          python -c "
+          from wintegrate.interop import get_foreground_window, get_window_class, get_window_title
+          hwnd = get_foreground_window()
+          print(f'foreground before the test: class={get_window_class(hwnd)!r} title={get_window_title(hwnd)!r}')
+          "
+
+      # The recording is not the evidence — the assertions are — but it answers
+      # the question a table of strings cannot: does this look like the bug that
+      # was reported? Kept whatever the outcome, because a red run is the one
+      # worth watching.
+      - name: Reproduce
+        env:
+          WINTEGRATE_RECORD: "1"
+        run: pytest src/modules/cmdpal/Tests/ui-repro -v -rxX -s
+
+      - name: Upload the recording
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reproduction-45816-${{ matrix.arch }}
+          path: recording-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
