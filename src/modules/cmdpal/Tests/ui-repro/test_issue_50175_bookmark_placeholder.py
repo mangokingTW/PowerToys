@@ -133,8 +133,49 @@ def _is_palette(hwnd: int) -> bool:
         return False
 
 
+def _ready_palette() -> int | None:
+    """The palette's window, but only once its search box is actually in the tree.
+
+    "Owns the foreground" is not the same as "is ready", and for this window it is
+    not even close: the palette **hides itself when it loses focus**, so anything
+    that steals the foreground for a moment leaves a live HWND whose content
+    island has been torn down. Waiting on the foreground and then looking for
+    `MainSearchBox` produces `ElementNotFoundError` and blames the locator.
+
+    So readiness is the search box existing. Returns None rather than raising:
+    the callers retry, because a transient thief should cost a retry and not the
+    run.
+    """
+    hwnd = get_foreground_window()
+    if not _is_palette(hwnd):
+        return None
+    try:
+        Window(hwnd).focus_content_island()
+        box = UiaElement.from_handle(hwnd).find_descendant(
+            automation_id=SEARCH_BOX_ID, timeout=1.0, required=False
+        )
+    except Exception:  # noqa: BLE001 - a window mid-teardown raises COM errors
+        return None
+    return hwnd if box is not None else None
+
+
+def _describe_foreground() -> str:
+    """For the failure message: what was in front instead."""
+    hwnd = get_foreground_window()
+    try:
+        from wintegrate import get_window_class, get_window_title
+
+        return (
+            f"hwnd={hwnd} class={get_window_class(hwnd)!r} "
+            f"title={get_window_title(hwnd)!r} "
+            f"process={get_process_image_name(get_window_pid(hwnd))!r}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"hwnd={hwnd} <{type(exc).__name__}>"
+
+
 def _launch_palette() -> int:
-    """Starts Command Palette by AUMID and returns its window once it has focus.
+    """Starts Command Palette by AUMID and returns it once its search box is up.
 
     The hotkey cannot be used here: it is registered by the Command Palette
     process, so immediately after a sweep there is nothing listening for it.
@@ -145,11 +186,13 @@ def _launch_palette() -> int:
     deadline = time.monotonic() + LAUNCH_TIMEOUT
     while time.monotonic() < deadline:
         time.sleep(2)
-        hwnd = get_foreground_window()
-        if _is_palette(hwnd):
+        hwnd = _ready_palette()
+        if hwnd:
             return hwnd
     raise AssertionError(
-        f"Command Palette did not come to the foreground within {LAUNCH_TIMEOUT}s"
+        f"Command Palette did not become ready within {LAUNCH_TIMEOUT}s. "
+        f"Foreground is {_describe_foreground()}. If that is something else, it "
+        f"stole the foreground and the palette hid itself."
     )
 
 
@@ -159,11 +202,14 @@ def _summon_palette() -> int:
     while time.monotonic() < deadline:
         send_vk_input(VK_SPACE, (VK_LWIN, VK_MENU))
         time.sleep(SETTLE)
-        hwnd = get_foreground_window()
-        if _is_palette(hwnd):
+        hwnd = _ready_palette()
+        if hwnd:
             return hwnd
         time.sleep(1)
-    raise AssertionError(f"Win+Alt+Space did not summon the palette within {LAUNCH_TIMEOUT}s")
+    raise AssertionError(
+        f"Win+Alt+Space did not summon a ready palette within {LAUNCH_TIMEOUT}s. "
+        f"Foreground is {_describe_foreground()}."
+    )
 
 
 def _edit_ids(hwnd: int) -> list[str]:
@@ -228,9 +274,13 @@ def _read_field(field: UiaElement) -> str:
 
 
 def _open_bookmark(hwnd: int) -> None:
-    """Types the bookmark's name into the palette and opens it."""
+    """Types the bookmark's name into the palette and opens it.
+
+    `_ready_palette` has already established that the search box is there, so a
+    miss here is a real failure rather than something to wait longer for.
+    """
     Window(hwnd).focus_content_island()
-    box = UiaElement.from_handle(hwnd).find_descendant(automation_id=SEARCH_BOX_ID, timeout=15)
+    box = UiaElement.from_handle(hwnd).find_descendant(automation_id=SEARCH_BOX_ID, timeout=5)
     box.set_focus()
     send_keys(BOOKMARK_NAME)
     time.sleep(SETTLE)
