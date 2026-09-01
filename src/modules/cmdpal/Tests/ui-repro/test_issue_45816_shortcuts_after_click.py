@@ -67,6 +67,7 @@ pytest.importorskip("wintegrate", reason="pip install wintegrate")
 from wintegrate import (  # noqa: E402
     UiaElement,
     Window,
+    WindowCensus,
     get_foreground_window,
     get_process_image_name,
     get_window_pid,
@@ -76,6 +77,7 @@ from wintegrate import (  # noqa: E402
     send_vk_input,
     sweep_processes_verified,
 )
+from wintegrate.interop import user32  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "win32", reason="drives the packaged app through UI Automation"
@@ -92,6 +94,7 @@ CONTROL_TYPE_EDIT = 50004
 # Win+Alt+Space is the palette's default hotkey. send_keys() has no Win-key
 # modifier in its grammar, so the chord goes through send_vk_input() by VK.
 VK_LWIN, VK_MENU, VK_SPACE, VK_ESCAPE, VK_RETURN = 0x5B, 0x12, 0x20, 0x1B, 0x0D
+WM_CLOSE = 0x0010
 
 # The form page is reached through a bookmark with a {placeholder}. The name is
 # ours, so matching it does not depend on the display language — the built-in
@@ -153,21 +156,63 @@ def _search_box(hwnd: int, timeout: float = 2.0) -> UiaElement | None:
         return None
 
 
+def _palette_process_windows() -> list[tuple[int, str]]:
+    """Every visible top-level window owned by the palette's process, with its title."""
+    return [
+        (snap.hwnd, snap.title)
+        for snap in WindowCensus.capture()
+        if snap.is_visible and _is_palette(snap.hwnd)
+    ]
+
+
+def _close_non_palette_windows() -> list[str]:
+    """Closes windows the palette's process owns that are not the palette.
+
+    On a first run Command Palette puts up a toast — its own class, its own
+    window, the same process — and on a hosted runner that toast takes and keeps
+    the foreground. Identifying the palette as "the foreground window owned by
+    cmdpal" therefore picked the toast, found no search box, and waited out the
+    timeout; the failure said `Foreground is title='Command Palette Toast'`.
+
+    So the palette is identified by *content* — the window that has a
+    MainSearchBox — and anything else that process owns is closed rather than
+    waited on. Matching the toast by title would tie this to the display
+    language.
+    """
+    closed = []
+    for hwnd, title in _palette_process_windows():
+        if _search_box(hwnd, timeout=0.5) is not None:
+            continue
+        closed.append(title or f"hwnd={hwnd}")
+        user32.SendMessageW(hwnd, WM_CLOSE, 0, 0)
+    if closed:
+        time.sleep(1.5)
+    return closed
+
+
 def _ready_palette() -> int | None:
-    """The palette, but only once its search box is in the tree.
+    """The palette, identified by having a search box, and brought to the front.
 
     Owning the foreground is not readiness for a window that hides itself on
     focus loss: anything that steals the foreground for a moment leaves a live
-    HWND whose content island has been torn down.
+    HWND whose content island has been torn down. And the foreground is not
+    identity either — see `_close_non_palette_windows`.
     """
-    hwnd = get_foreground_window()
-    if not _is_palette(hwnd):
-        return None
-    try:
-        Window(hwnd).focus_content_island()
-    except Exception:  # noqa: BLE001
-        return None
-    return hwnd if _search_box(hwnd) is not None else None
+    for hwnd, _ in _palette_process_windows():
+        if _search_box(hwnd, timeout=0.5) is None:
+            continue
+        if get_foreground_window() != hwnd:
+            Window(hwnd).set_foreground(verify=False)
+            time.sleep(0.5)
+        try:
+            Window(hwnd).focus_content_island()
+        except Exception:  # noqa: BLE001
+            continue
+        # Re-checked after the focus change: a window that went away mid-way
+        # would otherwise be returned as ready.
+        if _search_box(hwnd, timeout=1.0) is not None:
+            return hwnd
+    return None
 
 
 def _describe_foreground() -> str:
@@ -194,9 +239,13 @@ def _launch_palette() -> int:
         hwnd = _ready_palette()
         if hwnd:
             return hwnd
+        closed = _close_non_palette_windows()
+        if closed:
+            print(f"closed windows that are not the palette: {closed}")
     raise AssertionError(
         f"Command Palette did not become ready within {LAUNCH_TIMEOUT}s. "
-        f"Foreground is {_describe_foreground()}."
+        f"Foreground is {_describe_foreground()}. "
+        f"Windows owned by that process: {_palette_process_windows()}."
     )
 
 
@@ -209,10 +258,12 @@ def _summon_palette() -> int:
         hwnd = _ready_palette()
         if hwnd:
             return hwnd
+        _close_non_palette_windows()
         time.sleep(1)
     raise AssertionError(
         f"Win+Alt+Space did not summon a ready palette within {LAUNCH_TIMEOUT}s. "
-        f"Foreground is {_describe_foreground()}."
+        f"Foreground is {_describe_foreground()}. "
+        f"Windows owned by that process: {_palette_process_windows()}."
     )
 
 
