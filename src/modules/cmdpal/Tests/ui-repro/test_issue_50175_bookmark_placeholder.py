@@ -58,6 +58,7 @@ import pytest
 pytest.importorskip("wintegrate", reason="pip install wintegrate")
 
 from wintegrate import (  # noqa: E402
+    ImeConversion,
     UiaElement,
     Window,
     WindowCensus,
@@ -66,6 +67,7 @@ from wintegrate import (  # noqa: E402
     get_window_pid,
     launch_packaged_app,
     send_keys,
+    send_physical_keys,
     send_vk_input,
     sweep_processes_verified,
 )
@@ -206,6 +208,30 @@ def _ready_palette() -> int | None:
     return None
 
 
+def _type_text(hwnd: int, text: str) -> None:
+    """Types literal text as physical key presses rather than as Unicode.
+
+    Both put the same characters in the field. The difference is what anything
+    watching the keyboard sees: a physical key carries a real virtual key, while
+    Unicode injection arrives as `vkCode = VK_PACKET` with the character in
+    `scanCode`. A visualiser drawing the recording labels the former correctly and
+    mislabels the latter — `a` (97) shows up as Numpad1, `q` (113) as F2 — so a
+    recording of Unicode typing either says nothing or says something wrong.
+
+    `ime_mode` establishes English first, because a scan code means whatever the
+    active input state says it means: under Bopomofo, unshifted letters are
+    phonetic keys and correct injection produces an empty field. It also normalises
+    Caps Lock, which is desktop-global and would otherwise turn the text upper
+    case. The mode has to be *established*, not detected — `get_ime_status()`
+    reports no IMM32 context for this window while `WM_IME_CONTROL` still works.
+
+    Named keys and chords stay on `send_keys`: those already carry real virtual
+    keys.
+    """
+    with Window(hwnd).ime_mode(ImeConversion.ALPHANUMERIC):
+        send_physical_keys(text)
+
+
 def _describe_foreground() -> str:
     """For the failure message: what was in front instead."""
     hwnd = get_foreground_window()
@@ -334,7 +360,7 @@ def _open_bookmark(hwnd: int) -> None:
     Window(hwnd).focus_content_island()
     box = UiaElement.from_handle(hwnd).find_descendant(automation_id=SEARCH_BOX_ID, timeout=5)
     box.set_focus()
-    send_keys(BOOKMARK_NAME)
+    _type_text(hwnd, BOOKMARK_NAME)
     time.sleep(SETTLE)
     send_vk_input(VK_RETURN)
     time.sleep(SETTLE)
@@ -380,7 +406,7 @@ def observed(recording) -> dict[str, str]:
     steps["first_open"] = _read_field(field)
 
     field.set_focus()
-    send_keys(FIRST_VALUE)
+    _type_text(hwnd, FIRST_VALUE)
     time.sleep(1.5)
     steps["after_typing"] = _read_field(field)
 
