@@ -268,7 +268,7 @@ def observed(recording) -> dict[str, str]:
     print(f"seeded {BOOKMARKS_JSON}")
     print(f"bookmark {BOOKMARK_NAME!r} -> {bookmark_url!r}")
 
-    steps: dict[str, str] = {}
+    steps: dict[str, str] = {"seeded_bookmark": bookmark_url}
     hwnd = _launch_palette()
     recording.begin()
 
@@ -339,10 +339,18 @@ def test_the_palette_returns_to_its_list_between_the_two_opens(observed):
 
 
 def test_the_value_is_not_written_to_bookmarks_json(observed):
-    """Corroborates the root cause: nothing is persisted, so it is session state."""
+    """Corroborates the root cause: nothing is persisted, so it is session state.
+
+    The claim is "the file is byte-for-byte what was seeded", so it is checked by
+    comparing against the seeded value. An earlier version asserted that
+    `FIRST_VALUE` was not a *substring* of the saved bookmark, which failed on
+    both runners for a reason that had nothing to do with the bug: a hosted
+    runner's temp path is `C:\\Users\\RUNNER~1\\...`, and the 8.3 short name
+    contains a literal `1`.
+    """
     saved = json.loads(observed["bookmarks_json_after"])
     assert [entry["Name"] for entry in saved["Data"]] == [BOOKMARK_NAME]
-    assert FIRST_VALUE not in saved["Data"][0]["Bookmark"]
+    assert saved["Data"][0]["Bookmark"] == observed["seeded_bookmark"]
     assert observed["after_restart"] == ""
 
 
