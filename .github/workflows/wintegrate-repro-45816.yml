@@ -161,6 +161,40 @@ jobs:
       # the question a table of strings cannot: does this look like the bug that
       # was reported? Kept whatever the outcome, because a red run is the one
       # worth watching.
+      # Is the visualiser still up at the moment the recording starts? The action
+      # checked at setup time, and everything between then and here -- installing
+      # PowerToys, running it once, closing its windows -- is a chance for it to
+      # die. "It was running when we started it" is not the claim the recording
+      # depends on.
+      #
+      # Also reports whether its overlay window is somewhere a screen capture
+      # would see it: a running process whose overlay is not composited looks
+      # identical, from the video, to a process that is gone.
+      - name: Report the input visualiser state
+        shell: pwsh
+        run: |
+          $n = (Get-Process keyviz -ErrorAction SilentlyContinue | Measure-Object).Count
+          Write-Host "keyviz processes: $n"
+          python -c "
+          from wintegrate import WindowCensus, get_process_image_name, get_window_cloak_reason
+          from wintegrate.interop import RECT, user32
+          import ctypes
+          found = 0
+          for s in WindowCensus.capture():
+              try:
+                  img = (get_process_image_name(s.pid) or '').lower()
+              except Exception:
+                  continue
+              if 'keyviz' not in img:
+                  continue
+              found += 1
+              r = RECT(); user32.GetWindowRect(s.hwnd, ctypes.byref(r))
+              print(f'  keyviz window class={s.class_name!r} visible={s.is_visible} '
+                    f'cloaked={get_window_cloak_reason(s.hwnd)} '
+                    f'rect=({r.left},{r.top},{r.right},{r.bottom})')
+          print(f'keyviz windows seen: {found}')
+          "
+
       - name: Reproduce
         env:
           WINTEGRATE_RECORD: "1"
