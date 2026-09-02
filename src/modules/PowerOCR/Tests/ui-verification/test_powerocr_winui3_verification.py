@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 
 import pytest
-from wintegrate import Mouse, Window
+from wintegrate import NOTEPAD, Mouse, Window, send_keys
 from wintegrate.apps import sweep_processes_verified
 
 
@@ -281,31 +281,36 @@ def test_end_to_end_ocr_extraction_from_app_and_paste_to_notepad(recording):
         clipboard_result = _get_clipboard_text(timeout=4.0)
         print(f"OCR Extracted Clipboard Text: {clipboard_result!r}")
 
-        # 7. Open a destination Notepad, focus it, and paste with Ctrl+V so it is visually confirmed on the video recording
-        dest_proc = subprocess.Popen(["notepad.exe"])
-        time.sleep(2.0)
+        # 7. Open destination Notepad, focus it, paste via Ctrl+V, and directly read editor via UIA
+        dest_proc, dest_win = Window.launch_and_discover(
+            ["notepad.exe"],
+            timeout=20.0,
+            process_names=NOTEPAD.process_names,
+            window_classes=NOTEPAD.window_classes,
+        )
         try:
-            from wintegrate import send_keys
+            with dest_win.foreground(verify=False):
+                editor = dest_win.find_text_input()
+                editor.focus()
 
-            # Send Ctrl+V to paste the extracted text onto the screen
-            send_keys("^v")
-            time.sleep(2.0)
+                # Paste via Ctrl+V
+                send_keys("^v")
+                time.sleep(2.0)
 
-            # Programmatically verify that Notepad received the pasted text
-            _clear_clipboard()
-            send_keys("^a^c")
-            time.sleep(1.0)
-            pasted_in_notepad = _get_clipboard_text(timeout=3.0)
-            print(f"Verified text actually pasted inside Notepad: {pasted_in_notepad!r}")
-            assert pasted_in_notepad is not None and len(pasted_in_notepad.strip()) > 0, (
-                f"Expected Notepad to contain pasted OCR text, but clipboard copy returned {pasted_in_notepad!r}"
-            )
+                # Directly read Notepad's editor content via UI Automation (without sending copy keystrokes)
+                pasted_in_notepad = editor.get_value()
+                print(f"Direct UIA read from Notepad editor: {pasted_in_notepad!r}")
 
-            # Type confirmation message
-            send_keys("{Right}{Enter}--- Verified by wintegrate ---{Enter}")
-            time.sleep(2.0)
+                # Assert that Notepad directly contains the pasted text
+                assert pasted_in_notepad is not None and len(pasted_in_notepad.strip()) > 0, (
+                    f"Expected Notepad to contain pasted OCR text via UIA get_value(), but got {pasted_in_notepad!r}"
+                )
+
+                # Type confirmation footer message
+                send_keys("{Enter}--- Verified by wintegrate ---{Enter}")
+                time.sleep(2.0)
         finally:
-            dest_proc.terminate()
+            dest_win.close(force=True)
     finally:
         source_proc.terminate()
         powerocr_proc.terminate()
