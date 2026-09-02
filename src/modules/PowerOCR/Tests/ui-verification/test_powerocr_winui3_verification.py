@@ -251,24 +251,23 @@ def test_end_to_end_ocr_extraction_from_app_and_paste_to_notepad(recording):
     powerocr_proc = subprocess.Popen([str(exe), str(os.getpid())])
     time.sleep(2.0)
 
-    # 2. Create sample text file with clear target text
-    sample_text = "PowerToys WinUI 3 Text Extractor Verification 2026\nDeterministic Windows Desktop UI Automation by wintegrate\n"
-    sample_file = Path(tempfile.gettempdir()) / "powerocr_source_sample.txt"
-    sample_file.write_text(sample_text, encoding="utf-8")
-
-    # 3. Launch source Notepad displaying the sample text
+    # 2. Launch source Notepad and type the sample text cleanly
     source_proc, source_win = Window.launch_and_discover(
-        ["notepad.exe", str(sample_file)],
+        ["notepad.exe"],
         timeout=20.0,
         process_names=NOTEPAD.process_names,
         window_classes=NOTEPAD.window_classes,
     )
     source_win.move_and_resize(60, 60, 850, 520)
     source_win.set_foreground(verify=False)
-    time.sleep(1.5)
+    time.sleep(1.0)
+
+    editor_elem = source_win.find_text_input()
+    editor_elem.set_focus()
+    send_keys("PowerToys WinUI 3 Text Extractor Verification 2026{Enter}Deterministic UI Automation by wintegrate{Enter}")
+    time.sleep(1.0)
 
     # Compute exact text area bounds from source Notepad editor element
-    editor_elem = source_win.find_text_input()
     bounds = editor_elem.bounding_rectangle
     if bounds:
         left, top, right, bottom = bounds
