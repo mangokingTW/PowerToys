@@ -17,7 +17,18 @@ from pathlib import Path
 import pytest
 from wintegrate import Mouse, Window
 from wintegrate.apps import sweep_processes_verified
-from wintegrate.waits import settled
+
+
+def _wait_until(predicate, timeout: float = 10.0, interval: float = 0.1) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if predicate():
+                return True
+        except Exception:
+            pass
+        time.sleep(interval)
+    return False
 
 PROCESS = "PowerToys.PowerOCR.exe"
 WINDOW_CLASS = "WinUIDesktopWin32WindowClass"
@@ -71,7 +82,7 @@ def powerocr_app(recording):
     recording.begin()
     try:
         with win.foreground(verify=False):
-            assert settled(lambda: win.is_visible(), lambda v: v is True, timeout=10.0), (
+            assert _wait_until(lambda: win.is_visible(), timeout=10.0), (
                 "PowerOCR overlay window never became visible"
             )
             yield win
