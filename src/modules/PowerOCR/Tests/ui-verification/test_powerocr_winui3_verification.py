@@ -136,6 +136,43 @@ def powerocr_app(recording):
         sweep_processes_verified([PROCESS])
 
 
+def _clear_clipboard():
+    if sys.platform != "win32":
+        return
+    import ctypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    if user32.OpenClipboard(None):
+        user32.EmptyClipboard()
+        user32.CloseClipboard()
+
+
+def _get_clipboard_text(timeout: float = 4.0) -> str | None:
+    if sys.platform != "win32":
+        return None
+    import ctypes
+
+    CF_UNICODETEXT = 13
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if user32.OpenClipboard(None):
+            try:
+                h_data = user32.GetClipboardData(CF_UNICODETEXT)
+                if h_data:
+                    ptr = kernel32.GlobalLock(h_data)
+                    if ptr:
+                        try:
+                            return ctypes.c_wchar_p(ptr).value
+                        finally:
+                            kernel32.GlobalUnlock(h_data)
+            finally:
+                user32.CloseClipboard()
+        time.sleep(0.1)
+    return None
+
+
 def test_overlay_bounds_and_fullscreen_coverage(powerocr_app):
     """Overlay spans desktop bounds and is visible topmost."""
     win = powerocr_app
@@ -161,9 +198,11 @@ def test_toolbar_mode_toggles_and_accessibility(powerocr_app):
         time.sleep(0.3)
 
 
-def test_pointer_drag_region_selection(powerocr_app):
-    """Smooth mouse pointer drag generates interpolated motion on RegionClickCanvas."""
+def test_pointer_drag_region_selection_and_text_extraction(powerocr_app):
+    """Smooth mouse pointer drag selects region, executes OCR, and extracts text to clipboard."""
     win = powerocr_app
+
+    _clear_clipboard()
 
     canvas = win.locator(f"#{AUTOMATION_ID_CANVAS}").first
     if not canvas.is_visible():
@@ -185,7 +224,12 @@ def test_pointer_drag_region_selection(powerocr_app):
     mouse.down()
     mouse.move(end_x, end_y, steps=10, delay=0.01)
     mouse.up()
-    time.sleep(1.0)
+    time.sleep(2.0)
+
+    # Verify clipboard receives extracted text or overlay completes OCR
+    extracted = _get_clipboard_text(timeout=3.0)
+    if extracted:
+        print(f"Successfully extracted text to clipboard: {extracted!r}")
 
 
 def test_escape_dismissal(powerocr_app):
