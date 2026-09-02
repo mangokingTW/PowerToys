@@ -28,65 +28,30 @@ arrived somewhere a person would see it, which is also what the recording shows.
 
 from __future__ import annotations
 
-import ctypes
-import json
 import os
-import re
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 import pytest
-from wintegrate import NOTEPAD, ImeConversion, Mouse, Window, WindowCensus, get_process_image_name
+from wintegrate import NOTEPAD, ImeConversion, Mouse, Window
 from wintegrate.apps import sweep_processes_verified
-from wintegrate.interop import RECT, SM_CXSCREEN, SM_CYSCREEN, user32
+from wintegrate.interop import SM_CXSCREEN, SM_CYSCREEN, user32
 
-PROCESS = "PowerToys.PowerOCR.exe"
-
-#: PowerOCR waits on this event; setting it is what the PowerToys runner does when
-#: the Text Extractor hotkey fires. Signalling it directly means the test does not
-#: depend on a hotkey reaching a detached desktop, which is one of the blockers.
-SHOW_EVENT_NAME = r"Local\PowerOCREvent-dc864e06-e1af-4ecc-9078-f98bee745e3a"
+import powerocr_harness as h
 
 #: OCR has to read these back verbatim, so they are ordinary English words on one
-#: line: no glyphs that trade places under a recogniser (0/O, 1/l/I), and no
-#: line-break policy in play.
-#:
-#: Ordinary words specifically. An earlier version used "WINTEGRATE", which came
-#: back as "W INTEGRATE" -- a recogniser segments an unfamiliar token wherever it
-#: likes, and that is not a fact about the region that was selected.
+
 TEXT_INSIDE = "Selected region inside the band"
+
 TEXT_OUTSIDE = "Excluded sentence further down"
 
-GWL_EXSTYLE = -20
-WS_EX_TOPMOST = 0x00000008
-
-#: How far the overlay may fall short of the display edge and still count as
-#: covering it. See the assertion that uses it for the two measurements behind the
-#: number.
-OVERLAY_EDGE_TOLERANCE = 2
-
-#: PowerOCR's settings live under the module's *display* name, not its project name.
-SETTINGS_PATH = (
-    Path(os.environ.get("LOCALAPPDATA", r"C:\Users\Default\AppData\Local"))
-    / "Microsoft"
-    / "PowerToys"
-    / "TextExtractor"
-    / "settings.json"
-)
-
-#: Matched against `Windows.Globalization.Language.NativeName`, which is what
-#: OCROverlay compares `PreferredLanguage` to -- not a BCP-47 tag.
-OCR_LANGUAGE = "English (United States)"
-
 #: The two source windows are stacked with a gap wide enough that the band's lower
-#: edge lands nowhere near a glyph. Derived from the desktop size rather than
-#: hardcoded -- the hosted runners are 1024x768 and the local ARM64 VM is 800x600 --
-#: but fully determined once the size is known, which is what the drag is checked
-#: against.
+
 MARGIN = 40
+
 WINDOW_HEIGHT = 200
+
 GAP = 80
 
 
@@ -99,200 +64,6 @@ def _layout(screen_w: int, screen_h: int):
 
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="drives Windows UI")
-
-
-def _powerocr_executable() -> Path:
-    """Locates PowerOCR across the installer's layouts."""
-    custom = os.environ.get("POWERTOYS_POWEROCR_PATH")
-    if custom and Path(custom).exists():
-        return Path(custom)
-
-    roots = [
-        Path(os.environ.get("LOCALAPPDATA", r"C:\Users\Default\AppData\Local")) / "PowerToys",
-        Path(os.environ.get("LOCALAPPDATA", r"C:\Users\Default\AppData\Local"))
-        / "Programs"
-        / "PowerToys",
-        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "PowerToys",
-    ]
-    for root in roots:
-        for sub in ("", "WinUI3Apps", r"modules\PowerOCR"):
-            candidate = root / sub / PROCESS if sub else root / PROCESS
-            if candidate.exists():
-                return candidate
-    for root in roots:
-        if root.exists():
-            found = list(root.rglob(PROCESS))
-            if found:
-                return found[0]
-
-    raise FileNotFoundError(f"{PROCESS} is not under any of {[str(r) for r in roots]}")
-
-
-def _visible_overlay_windows() -> list[tuple[int, tuple[int, int, int, int], bool, str]]:
-    """Every visible top-level window owned by PowerOCR, as (hwnd, rect, topmost, title).
-
-    Enumerated through WindowCensus. `Window.find_all` does not exist, and calling it
-    inside a bare `except Exception` is how an earlier version of this file reported
-    "overlay not detected" on every run while the real error was an AttributeError.
-
-    Matched on ownership and geometry rather than on window class. The class carries a
-    per-run GUID (`HwndWrapper[PowerToys.PowerOCR;;<guid>]` on the shipped WPF build,
-    `WinUIDesktopWin32WindowClass` after the migration), so a class filter would be a
-    filter on which build is installed.
-    """
-    found = []
-    for snap in WindowCensus.capture():
-        if not snap.is_visible:
-            continue
-        image = (get_process_image_name(snap.pid) or "").lower()
-        if not image.endswith(PROCESS.lower()):
-            continue
-        rect = RECT()
-        user32.GetWindowRect(snap.hwnd, ctypes.byref(rect))
-        topmost = bool(user32.GetWindowLongW(snap.hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)
-        found.append(
-            (snap.hwnd, (rect.left, rect.top, rect.right, rect.bottom), topmost, snap.title)
-        )
-    return found
-
-
-def _pin_ocr_language(executable: Path) -> str | None:
-    """Pins the recogniser to English, and reports what it was before.
-
-    Without this the test asserts English text while PowerOCR picks its engine from
-    the host's language preference: it passes on an en-US runner and fails anywhere
-    else for a reason that has nothing to do with region selection. The local ARM64
-    VM is zh-TW and returned Chinese glyphs for this line -- with both en-US and
-    zh-TW recognisers installed, so it was the preference and not a missing pack.
-
-    The default file is written by PowerOCR rather than by this test: only the one
-    field is patched, so the rest of the schema stays whatever the installed version
-    says it is. The key is matched case-insensitively for the same reason -- the
-    serializer's naming policy is not this test's business.
-    """
-    if not SETTINGS_PATH.exists():
-        seeder = subprocess.Popen([str(executable), str(os.getpid())])
-        try:
-            deadline = time.monotonic() + 20.0
-            while time.monotonic() < deadline and not SETTINGS_PATH.exists():
-                time.sleep(0.3)
-        finally:
-            seeder.terminate()
-            seeder.wait(timeout=10)
-        sweep_processes_verified([PROCESS])
-    if not SETTINGS_PATH.exists():
-        return None
-
-    data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8-sig"))
-    properties = data.setdefault("properties", {})
-    key = next((k for k in properties if k.lower() == "preferredlanguage"), "PreferredLanguage")
-    previous = properties.get(key)
-    properties[key] = OCR_LANGUAGE
-    SETTINGS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    return previous
-
-
-def _signal_show_event() -> bool:
-    """Opens PowerOCR's named event and sets it, which raises the overlay."""
-    import ctypes
-    from ctypes import wintypes
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.OpenEventW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
-    kernel32.OpenEventW.restype = wintypes.HANDLE
-    kernel32.SetEvent.argtypes = [wintypes.HANDLE]
-    kernel32.SetEvent.restype = wintypes.BOOL
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel32.CloseHandle.restype = wintypes.BOOL
-
-    EVENT_MODIFY_STATE = 0x0002
-    handle = kernel32.OpenEventW(EVENT_MODIFY_STATE, False, SHOW_EVENT_NAME)
-    if not handle:
-        return False
-    try:
-        return bool(kernel32.SetEvent(handle))
-    finally:
-        kernel32.CloseHandle(handle)
-
-
-def _clipboard_calls():
-    """Clipboard entry points with their signatures declared.
-
-    The argtypes are not decoration. Without `GetClipboardData.restype`, ctypes
-    converts the returned handle as `c_int`, so on 64-bit any handle above 2^31 is
-    truncated, `GlobalLock` is handed a bogus value, and reading the string it
-    points at takes down the interpreter with an access violation. It looked
-    intermittent because a small handle value survives the truncation.
-    """
-    import ctypes
-    from ctypes import wintypes
-
-    user = ctypes.WinDLL("user32", use_last_error=True)
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-
-    user.OpenClipboard.argtypes = [wintypes.HWND]
-    user.OpenClipboard.restype = wintypes.BOOL
-    user.EmptyClipboard.argtypes = []
-    user.EmptyClipboard.restype = wintypes.BOOL
-    user.CloseClipboard.argtypes = []
-    user.CloseClipboard.restype = wintypes.BOOL
-    user.GetClipboardData.argtypes = [wintypes.UINT]
-    user.GetClipboardData.restype = wintypes.HANDLE
-    kernel.GlobalLock.argtypes = [wintypes.HGLOBAL]
-    kernel.GlobalLock.restype = ctypes.c_void_p
-    kernel.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
-    kernel.GlobalUnlock.restype = wintypes.BOOL
-    return user, kernel, ctypes
-
-
-def _clear_clipboard() -> None:
-    user, _, _ = _clipboard_calls()
-    if user.OpenClipboard(None):
-        try:
-            user.EmptyClipboard()
-        finally:
-            user.CloseClipboard()
-
-
-def _wait_for_clipboard_text(timeout: float = 20.0) -> str | None:
-    """Waits for PowerOCR to publish its result.
-
-    Only a synchronisation point: the assertion is made on what reaches Notepad,
-    not on this. Polling the clipboard is how the test knows OCR has finished
-    rather than sleeping a guessed interval and pasting nothing.
-    """
-    CF_UNICODETEXT = 13
-    user, kernel, ctypes_mod = _clipboard_calls()
-
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if user.OpenClipboard(None):
-            try:
-                handle = user.GetClipboardData(CF_UNICODETEXT)
-                if handle:
-                    pointer = kernel.GlobalLock(handle)
-                    if pointer:
-                        try:
-                            text = ctypes_mod.wstring_at(pointer)
-                        finally:
-                            kernel.GlobalUnlock(handle)
-                        if text and text.strip():
-                            return text
-            finally:
-                user.CloseClipboard()
-        time.sleep(0.2)
-    return None
-
-
-def _normalise(text: str) -> str:
-    """Compares words, not layout.
-
-    Whitespace and case are the two things a recogniser is entitled to render
-    differently from the source without being wrong about the region it read. Every
-    other difference -- a missing word, a partial word, a word from the window that
-    should have been outside the selection -- still fails the comparison.
-    """
-    return re.sub(r"\s+", " ", text).strip().upper()
 
 
 def _open_source_window(text: str, rect: tuple[int, int, int, int]) -> Window:
@@ -331,7 +102,7 @@ def _open_source_window(text: str, rect: tuple[int, int, int, int]) -> Window:
     time.sleep(0.8)
 
     typed = editor.get_value()
-    assert _normalise(typed) == _normalise(text), (
+    assert h.normalise(typed) == h.normalise(text), (
         f"the source window does not hold the text this test asserts against: "
         f"wanted {text!r}, editor holds {typed!a}"
     )
@@ -340,8 +111,8 @@ def _open_source_window(text: str, rect: tuple[int, int, int, int]) -> Window:
 
 def test_pointer_drag_bounds_the_extracted_text(recording):
     """Drag a region over one window, and get back exactly that window's text."""
-    executable = _powerocr_executable()
-    sweep_processes_verified([PROCESS, "notepad.exe", "Notepad.exe"])
+    executable = h.powerocr_executable()
+    sweep_processes_verified([h.PROCESS, "notepad.exe", "Notepad.exe"])
 
     screen_w = user32.GetSystemMetrics(SM_CXSCREEN)
     screen_h = user32.GetSystemMetrics(SM_CYSCREEN)
@@ -352,8 +123,8 @@ def test_pointer_drag_bounds_the_extracted_text(recording):
         f"{GAP}px gap need {needed}px of height"
     )
 
-    was = _pin_ocr_language(executable)
-    print(f"OCR language pinned to {OCR_LANGUAGE!r} (was {was!r})")
+    was = h.pin_ocr_language(executable)
+    print(f"OCR language pinned to {h.OCR_LANGUAGE!r} (was {was!r})")
 
     powerocr = subprocess.Popen([str(executable), str(os.getpid())])
     try:
@@ -386,32 +157,32 @@ def test_pointer_drag_bounds_the_extracted_text(recording):
             f"the source editor is only {bottom - top}px tall; half of it may clip the line"
         )
 
-        _clear_clipboard()
+        h.clear_clipboard()
 
         # The module's own checklist, "Activation paths": *launch the Text Extractor
         # executable directly (standalone mode); verify the overlay appears on
         # activation*. Asserted here rather than inferred from OCR succeeding later --
         # if the overlay never came up, the only symptom downstream would be an empty
         # clipboard, which says nothing about why.
-        already_up = _visible_overlay_windows()
+        already_up = h.visible_overlay_windows()
         assert not already_up, (
             f"PowerOCR already has a visible window before its show event was "
             f"signalled, so this cannot attribute the overlay to the activation: "
             f"{already_up}"
         )
-        assert _signal_show_event(), (
-            f"could not open {SHOW_EVENT_NAME}; PowerOCR is not waiting on its "
+        assert h.signal_show_event(), (
+            f"could not open {h.SHOW_EVENT_NAME}; PowerOCR is not waiting on its "
             f"show event, so the overlay was never raised"
         )
 
         deadline = time.monotonic() + 15.0
         overlays: list = []
         while time.monotonic() < deadline:
-            overlays = _visible_overlay_windows()
+            overlays = h.visible_overlay_windows()
             if overlays:
                 break
             time.sleep(0.25)
-        assert overlays, f"no visible window appeared within 15s of signalling {SHOW_EVENT_NAME}"
+        assert overlays, f"no visible window appeared within 15s of signalling {h.SHOW_EVENT_NAME}"
 
         # One overlay per display, so on a multi-monitor host there is more than one;
         # what matters is that the primary display is covered by a topmost one.
@@ -428,7 +199,7 @@ def test_pointer_drag_bounds_the_extracted_text(recording):
         # not settled by which build is under test. The rect is printed on every run,
         # so a real change in it stays visible; asserting the exact edge would just
         # fail runs for a reason unrelated to region selection.
-        inset = OVERLAY_EDGE_TOLERANCE
+        inset = h.OVERLAY_EDGE_TOLERANCE
         primary = [
             entry
             for entry in overlays
@@ -461,7 +232,7 @@ def test_pointer_drag_bounds_the_extracted_text(recording):
         time.sleep(0.8)
         mouse.up()
 
-        extracted = _wait_for_clipboard_text(timeout=20.0)
+        extracted = h.wait_for_clipboard_text(timeout=20.0)
         assert extracted is not None, (
             "PowerOCR published no text within 20s of the drag being released"
         )
@@ -497,10 +268,10 @@ def test_pointer_drag_bounds_the_extracted_text(recording):
             pasted = editor.get_value()
             print(f"read back from Notepad: {pasted!a}")
 
-            assert _normalise(pasted) == _normalise(TEXT_INSIDE), (
+            assert h.normalise(pasted) == h.normalise(TEXT_INSIDE), (
                 f"the selection did not bound the OCR input.\n"
-                f"  expected: {_normalise(TEXT_INSIDE)!a}\n"
-                f"  got:      {_normalise(pasted)!a}\n"
+                f"  expected: {h.normalise(TEXT_INSIDE)!a}\n"
+                f"  got:      {h.normalise(pasted)!a}\n"
                 f"  dragged:  ({start_x}, {start_y}) -> ({end_x}, {end_y})\n"
                 f"  the outside window held {TEXT_OUTSIDE!r} at y="
                 f"{outside_rect[1]}; text from it appearing above means the "
@@ -513,4 +284,4 @@ def test_pointer_drag_bounds_the_extracted_text(recording):
             )
     finally:
         powerocr.terminate()
-        sweep_processes_verified([PROCESS, "notepad.exe", "Notepad.exe"])
+        sweep_processes_verified([h.PROCESS, "notepad.exe", "Notepad.exe"])

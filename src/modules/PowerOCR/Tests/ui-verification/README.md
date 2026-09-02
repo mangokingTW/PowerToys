@@ -15,7 +15,7 @@ input desktop has none to dispatch to.
 in-process, with no driver and no daemon, so the same interaction runs on
 `windows-latest` and `windows-11-arm` with nothing attached.
 
-## What the test actually asserts
+## The flagship: what the region test asserts
 
 The point is the **bounds** of the selection, not that OCR returned something.
 
@@ -49,7 +49,54 @@ assertion is an equality rather than a "not empty" check:
 | `erministic UI Automation by wintegrate` | the band started 3 characters into the line |
 | `... 100% WINDOWS (CRLF) UTF-8` | the band ran past the editor into Notepad's status bar |
 
-## Two preconditions the test controls rather than assumes
+## The other checklist items covered here
+
+`test_powerocr_toolbar_and_keyboard.py` covers five more, all through UI Automation
+with no driver and nothing attached. The toolbar's AutomationIds are present and
+carry the patterns needed, on the shipped build as well as on main:
+
+| checklist item | how |
+| --- | --- |
+| *four toolbar buttons each have a non-empty accessible name* | read `Name`; non-empty is the whole assertion, because the names are localized |
+| *toggle Single-line mode; the button reports Selected* | `TogglePattern`, state read back rather than assumed |
+| *toggle Table mode; the button reports Selected* | same |
+| *tab through the toolbar; each control reachable without a mouse* | send Tab, read the focused element each time. Observed order: language combo, Single-line, Table, Settings, Cancel, then wraps |
+| *Escape after toggling modes dismisses the overlay* | both modes on, then Escape, then the overlay must be gone |
+| *open the language list from the keyboard; items accessible* | **Alt+Down**, not the Shift+F10 the checklist names -- see below |
+
+### One place the checklist's wording is out of date
+
+The language item says to open the flyout with Shift+F10 or the right-click key.
+Measured on the shipped build, each gesture against a freshly raised overlay with
+the combo focused but *not* clicked:
+
+```
+Alt+Down    collapsed -> expanded    (items 0 -> 2)
+F4          collapsed -> expanded    (items 0 -> 2)
+Space       collapsed -> collapsed
+Shift+F10   collapsed -> collapsed
+Apps key    collapsed -> collapsed
+```
+
+The chooser is a toolbar ComboBox, and Alt+Down / F4 are its keyboard affordances;
+Shift+F10 belongs to the right-click context menu that line was written for. The
+item's intent holds -- the list is reachable without a mouse -- and its letter does
+not.
+
+Two measurement traps on the way there, both of which made an earlier version of
+that test assert nothing:
+
+- `set_focus()` clicks by default. That opens the combo with the mouse, so the list
+  was already expanded before any key was sent. Focus is now taken with
+  `click=False` and the collapsed state asserted first.
+- a collapsed ComboBox reports 0 items, but one opened by a click reports 2. So the
+  item count measures how it was opened, not whether it is open; the assertion is on
+  `ExpandCollapseState`.
+
+All three tests that depend on a keystroke landing were checked by removing the
+keystroke and nothing else. Each one fails when it is gone.
+
+## Two preconditions the tests control rather than assume
 
 - **OCR language.** `PreferredLanguage` in `%LOCALAPPDATA%\Microsoft\PowerToys\TextExtractor\settings.json`
   is pinned to `English (United States)` before launch. PowerOCR otherwise picks its

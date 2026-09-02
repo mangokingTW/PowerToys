@@ -7,9 +7,13 @@ from __future__ import annotations
 
 import os
 import platform
+import subprocess
+import time
 from pathlib import Path
 
 import pytest
+from wintegrate import Window
+from wintegrate.interop import SM_CXSCREEN, SM_CYSCREEN, user32
 
 RECORDING_FPS = 10
 OUTPUT_DIR = Path("recording-artifacts")
@@ -54,3 +58,58 @@ def pytest_sessionfinish(session, exitstatus):
 def recording():
     """Fixture alias for compatibility with test signatures."""
     yield
+
+
+@pytest.fixture
+def overlay():
+    """A raised Text Extractor overlay, as a Window.
+
+    Function-scoped on purpose. One of these tests dismisses the overlay with
+    Escape, and a shared fixture would leave the next test to guess whether it is
+    still up -- which is how a suite reports success without having exercised
+    anything. Starting the process per test costs a few seconds and removes the
+    question.
+
+    Failure to raise it fails the test rather than skipping it. "PowerOCR overlay
+    not detected" was the skip reason an earlier version printed on every run while
+    the real fault was a call to a function that does not exist.
+    """
+    import powerocr_harness as harness
+
+    executable = harness.powerocr_executable()
+    harness.sweep()
+    was = harness.pin_ocr_language(executable)
+    print(f"OCR language pinned to {harness.OCR_LANGUAGE!r} (was {was!r})")
+
+    process = subprocess.Popen([str(executable), str(os.getpid())])
+    try:
+        time.sleep(2.0)
+        already = harness.visible_overlay_windows()
+        assert not already, (
+            f"PowerOCR has a visible window before its show event was signalled, so "
+            f"nothing here can be attributed to the activation: {already}"
+        )
+        assert harness.signal_show_event(), (
+            f"could not open {harness.SHOW_EVENT_NAME}; PowerOCR is not waiting on its "
+            f"show event, so the overlay was never raised"
+        )
+        overlays = harness.wait_for_overlay(timeout=15.0)
+        assert overlays, (
+            f"no visible window appeared within 15s of signalling {harness.SHOW_EVENT_NAME}"
+        )
+
+        screen_w = user32.GetSystemMetrics(SM_CXSCREEN)
+        screen_h = user32.GetSystemMetrics(SM_CYSCREEN)
+        primary = harness.overlay_covering_primary(overlays, screen_w, screen_h)
+        assert primary, (
+            f"no overlay covers the {screen_w}x{screen_h} primary display to within "
+            f"{harness.OVERLAY_EDGE_TOLERANCE}px; visible windows were {overlays}"
+        )
+        hwnd, rect, topmost, title = primary
+        assert topmost, f"the overlay covering the primary display is not topmost: {primary}"
+        print(f"overlay up: hwnd={hwnd:#x} rect={rect} topmost={topmost} title={title!r}")
+
+        yield Window(hwnd)
+    finally:
+        process.terminate()
+        harness.sweep()
