@@ -1,11 +1,12 @@
-# Validates PowerToys Text Extractor (PowerOCR WinUI 3) automation in unattended CI.
+# Runs one of the interactive checks that microsoft/PowerToys#49431 lists as BLOCKED,
+# on a stock hosted runner with no WinAppDriver and no attached desktop:
 #
-# Addresses microsoft/PowerToys#49656 & microsoft/PowerToys#49431:
-# - Headless execution without WinAppDriver / detached desktop blockers
-# - Topmost overlay window activation (WindowEx / WinUIDesktopWin32WindowClass)
-# - Escape key and interactive dismissal
-# - Toolbar toggle modes (SingleLine, Table) and accessibility attributes
-# - Region selection via smooth interpolated mouse pointer drag
+#   summon the Text Extractor overlay, drag a selection rectangle across it, and
+#   assert the extracted text equals exactly the line that was inside the rectangle.
+#
+# Green means the drag bounded the OCR input. It is an equality, not a "text is not
+# empty" check -- see the README for the two earlier versions that passed while
+# selecting the wrong region.
 name: Verify PowerOCR WinUI 3
 
 on:
@@ -38,7 +39,9 @@ jobs:
 
       - uses: mangokingTW/wintegrate/.github/actions/setup-windows-gui-test@main
         with:
-          wintegrate-version: ">=0.5.5"
+          # 0.5.6, not 0.5.5: the Mouse controller this test drives the drag with
+          # landed in 0.5.6, and 0.5.5 installs cleanly and then fails on import.
+          wintegrate-version: ">=0.5.6"
 
       - name: Install PowerToys ${{ env.POWERTOYS_VERSION }}
         timeout-minutes: 25
@@ -90,7 +93,7 @@ jobs:
             Stop-Process -Force -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 3
 
-      - name: Run PowerOCR WinUI 3 UI Verification Tests
+      - name: Verify the region drag bounds the extracted text
         env:
           WINTEGRATE_RECORD: "1"
         run: pytest src/modules/PowerOCR/Tests/ui-verification -v -s
