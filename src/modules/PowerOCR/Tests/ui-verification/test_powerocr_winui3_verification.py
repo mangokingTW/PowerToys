@@ -388,39 +388,34 @@ def test_pointer_drag_bounds_the_extracted_text(recording):
             process_names=NOTEPAD.process_names,
             window_classes=NOTEPAD.window_classes,
         )
-        try:
-            dest_win.move_and_resize(
-                MARGIN, MARGIN, screen_w - 2 * MARGIN, screen_h - 2 * MARGIN - 60
+        dest_win.move_and_resize(MARGIN, MARGIN, screen_w - 2 * MARGIN, screen_h - 2 * MARGIN - 60)
+        with dest_win.foreground(verify=False):
+            editor = dest_win.find_text_input(timeout=30.0)
+            editor.set_focus()
+            # Cleared for the same session-restore reason as the sources: what is
+            # read back has to be the paste and nothing else.
+            editor.set_value_verified("")
+            editor.set_focus()
+            editor.send_keys("^v")
+            time.sleep(1.5)
+
+            pasted = editor.get_value()
+            print(f"read back from Notepad: {pasted!a}")
+
+            assert _normalise(pasted) == _normalise(TEXT_INSIDE), (
+                f"the selection did not bound the OCR input.\n"
+                f"  expected: {_normalise(TEXT_INSIDE)!a}\n"
+                f"  got:      {_normalise(pasted)!a}\n"
+                f"  dragged:  ({start_x}, {start_y}) -> ({end_x}, {end_y})\n"
+                f"  the outside window held {TEXT_OUTSIDE!r} at y="
+                f"{outside_rect[1]}; text from it appearing above means the "
+                f"band was taller than it was dragged.\n"
+                f"  if the text came back as another script entirely, the host "
+                f"is missing the en-US OCR language "
+                f"(Language.OCR~~~en-US~0.0.1.0) and the recogniser fell back "
+                f"to whichever one is installed -- seen on a zh-TW VM, which "
+                f"returned Chinese glyphs for this line"
             )
-            with dest_win.foreground(verify=False):
-                editor = dest_win.find_text_input(timeout=30.0)
-                editor.set_focus()
-                # Cleared for the same session-restore reason as the sources: what is
-                # read back has to be the paste and nothing else.
-                editor.set_value_verified("")
-                editor.set_focus()
-                editor.send_keys("^v")
-                time.sleep(1.5)
-
-                pasted = editor.get_value()
-                print(f"read back from Notepad: {pasted!a}")
-
-                assert _normalise(pasted) == _normalise(TEXT_INSIDE), (
-                    f"the selection did not bound the OCR input.\n"
-                    f"  expected: {_normalise(TEXT_INSIDE)!a}\n"
-                    f"  got:      {_normalise(pasted)!a}\n"
-                    f"  dragged:  ({start_x}, {start_y}) -> ({end_x}, {end_y})\n"
-                    f"  the outside window held {TEXT_OUTSIDE!r} at y="
-                    f"{outside_rect[1]}; text from it appearing above means the "
-                    f"band was taller than it was dragged.\n"
-                    f"  if the text came back as another script entirely, the host "
-                    f"is missing the en-US OCR language "
-                    f"(Language.OCR~~~en-US~0.0.1.0) and the recogniser fell back "
-                    f"to whichever one is installed -- seen on a zh-TW VM, which "
-                    f"returned Chinese glyphs for this line"
-                )
-        finally:
-            pass
     finally:
         powerocr.terminate()
         sweep_processes_verified([PROCESS, "notepad.exe", "Notepad.exe"])
