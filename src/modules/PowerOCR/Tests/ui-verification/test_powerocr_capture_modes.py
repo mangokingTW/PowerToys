@@ -138,12 +138,24 @@ def _source_with_two_lines(rect):
 
 def _extract_both_lines(mouse: Mouse, editor, first, second) -> str | None:
     """Drags a band over both lines and returns what PowerOCR published."""
-    left, _top, right, _bottom = editor.bounding_rectangle
-    # The full width of the editor, and vertically from just above the first line to
-    # just below the second. Horizontally safe: running past the editor's *bottom* is
-    # what once swept Notepad's status bar into the result.
-    start_x, start_y = left + 2, first[1] - 4
+    _left, _top, right, _bottom = editor.bounding_rectangle
+
+    # The left edge comes from the text origin -- the caret's x in an empty editor --
+    # and not from the editor's rectangle. `editor_left + 2` clipped the first glyph
+    # on x64 while working on ARM64: both runs came back as 'arbour lights at dusk',
+    # missing the H. The editor's rectangle and the first glyph are not the same
+    # place, and the difference is smaller than the padding either arch happens to
+    # use.
+    #
+    # Vertically from just above the first line to just below the second. Running past
+    # the editor's *bottom* is what once swept Notepad's status bar into the result,
+    # so the band stops at the second line.
+    text_left = first[0]
+    start_x, start_y = max(0, text_left - 14), first[1] - 4
     end_x, end_y = right - 2, second[2] + 4
+    assert start_x < text_left, (
+        f"the band starts at {start_x}, not left of the first glyph at {text_left}"
+    )
 
     h.clear_clipboard()
     mouse.move(start_x, start_y, steps=6, delay=0.02)
