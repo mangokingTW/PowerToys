@@ -64,6 +64,42 @@ carry the patterns needed, on the shipped build as well as on main:
 | *Escape after toggling modes dismisses the overlay* | both modes on, then Escape, then the overlay must be gone |
 | *open the language list from the keyboard; items accessible* | **Alt+Down**, not the Shift+F10 the checklist names -- see below |
 
+### Single-line mode, and one line the checklist describes differently
+
+`test_powerocr_capture_modes.py` covers the single-line capture mode as a
+*differential*: the same two-line selection, dragged twice, with only the toggle
+changing.
+
+```
+single-line off: 'Harbour lights at dusk\r\nFerries cross the water'
+single-line on:  'Harbour lights at dusk Ferries cross the water'
+```
+
+The checklist line reads *"activate Single-line, click a single line of text;
+verify one line is on the clipboard"*, but the button's own accessible name is
+**"Format result as a single line"** -- the mode is about how a multi-line result
+is joined, not about which line gets picked. The differential is what the button
+says it does, and it cannot pass by accident: one run cannot distinguish "the mode
+works" from "the recogniser returned one line anyway".
+
+### Clicking a word without dragging: measured, not covered
+
+The checklist's *"click a single word or character without dragging"* is not
+covered, because no gesture tried produced a result. Five deliveries, each against
+a freshly raised overlay with the cursor inside the same word:
+
+| delivery | result |
+| --- | --- |
+| `Mouse.click()` | nothing |
+| move, down, hold 0.35s, up | nothing |
+| tiny drag (6px) | nothing |
+| **drag across the whole word** | **`Kestrel`** |
+| click 8px lower | nothing |
+
+So a drag over that word works and a click on it does not, within a 12s wait. That
+line is unchecked in the checklist too, so this is a question for whoever knows the
+intended gesture rather than a claim about the product.
+
 ### One place the checklist's wording is out of date
 
 The language item says to open the flyout with Shift+F10 or the right-click key.
