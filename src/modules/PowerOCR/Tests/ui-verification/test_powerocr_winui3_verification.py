@@ -257,8 +257,28 @@ def test_end_to_end_ocr_extraction_from_app_and_paste_to_notepad(recording):
     sample_file.write_text(sample_text, encoding="utf-8")
 
     # 3. Launch source Notepad displaying the sample text
-    source_proc = subprocess.Popen(["notepad.exe", str(sample_file)])
-    time.sleep(2.0)
+    source_proc, source_win = Window.launch_and_discover(
+        ["notepad.exe", str(sample_file)],
+        timeout=20.0,
+        process_names=NOTEPAD.process_names,
+        window_classes=NOTEPAD.window_classes,
+    )
+    source_win.move_and_resize(60, 60, 850, 520)
+    source_win.set_foreground(verify=False)
+    time.sleep(1.5)
+
+    # Compute exact text area bounds from source Notepad editor element
+    editor_elem = source_win.find_text_input()
+    bounds = editor_elem.bounding_rectangle
+    if bounds:
+        left, top, right, bottom = bounds
+        start_x = int(left + 20)
+        start_y = int(top + 20)
+        end_x = int(min(right - 20, left + 750))
+        end_y = int(min(bottom - 20, top + 140))
+    else:
+        start_x, start_y = 90, 140
+        end_x, end_y = 800, 260
 
     try:
         _clear_clipboard()
@@ -267,19 +287,23 @@ def test_end_to_end_ocr_extraction_from_app_and_paste_to_notepad(recording):
         _signal_show_event()
         time.sleep(1.5)
 
-        # 5. Drag smoothly over the text area with mouse HUD
+        # 5. Drag smoothly and precisely over the Notepad text area with mouse HUD
         mouse = Mouse()
-        mouse.move(150, 180, steps=5, delay=0.02)
+        mouse.move(start_x, start_y, steps=8, delay=0.02)
         time.sleep(0.5)
         mouse.down()
-        mouse.move(750, 320, steps=15, delay=0.03)
-        time.sleep(0.5)
+        mouse.move(end_x, end_y, steps=25, delay=0.03)
+        time.sleep(0.8)
         mouse.up()
         time.sleep(2.0)
 
         # 6. Verify clipboard received OCR text
         clipboard_result = _get_clipboard_text(timeout=4.0)
         print(f"OCR Extracted Clipboard Text: {clipboard_result!r}")
+
+        # Close source Notepad
+        source_win.close(force=True)
+        time.sleep(1.0)
 
         # 7. Open destination Notepad, focus it, paste via Ctrl+V, and directly read editor via UIA
         dest_proc, dest_win = Window.launch_and_discover(
@@ -288,6 +312,7 @@ def test_end_to_end_ocr_extraction_from_app_and_paste_to_notepad(recording):
             process_names=NOTEPAD.process_names,
             window_classes=NOTEPAD.window_classes,
         )
+        dest_win.move_and_resize(100, 100, 800, 500)
         try:
             with dest_win.foreground(verify=False):
                 editor = dest_win.find_text_input()
@@ -297,7 +322,7 @@ def test_end_to_end_ocr_extraction_from_app_and_paste_to_notepad(recording):
                 send_keys("^v")
                 time.sleep(2.0)
 
-                # Directly read Notepad's editor content via UI Automation (without sending copy keystrokes)
+                # Directly read Notepad's editor content via UI Automation
                 pasted_in_notepad = editor.get_value()
                 print(f"Direct UIA read from Notepad editor: {pasted_in_notepad!r}")
 
@@ -308,10 +333,9 @@ def test_end_to_end_ocr_extraction_from_app_and_paste_to_notepad(recording):
 
                 # Type confirmation footer message
                 send_keys("{Enter}--- Verified by wintegrate ---{Enter}")
-                time.sleep(2.0)
+                time.sleep(2.5)
         finally:
             dest_win.close(force=True)
     finally:
-        source_proc.terminate()
         powerocr_proc.terminate()
         sweep_processes_verified([PROCESS, "notepad.exe", "Notepad.exe"])
