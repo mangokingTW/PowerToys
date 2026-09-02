@@ -1,0 +1,108 @@
+# Runs one of the interactive checks that microsoft/PowerToys#49431 lists as BLOCKED,
+# on a stock hosted runner with no WinAppDriver and no attached desktop:
+#
+#   summon the Text Extractor overlay, drag a selection rectangle across it, and
+#   assert the extracted text equals exactly the line that was inside the rectangle.
+#
+# Green means the drag bounded the OCR input. It is an equality, not a "text is not
+# empty" check -- see the README for the two earlier versions that passed while
+# selecting the wrong region.
+name: Verify PowerOCR WinUI 3
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [wintegrate-verify-issue-49431]
+
+permissions:
+  contents: read
+
+env:
+  POWERTOYS_VERSION: 0.101.2362.0
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: windows-latest
+            sha256: D56FA7130FA68AFE553068C15A59A6B24C8DBCC9A0989A43EF0FC5A373230DE3
+          - arch: arm64
+            os: windows-11-arm
+            sha256: 4C2AE5156B7E4F1F5BA744BA6E1CF6BFE3D9614978356E6B00AA47CAB86350DB
+    name: "PowerOCR on ${{ matrix.arch }}"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mangokingTW/wintegrate/.github/actions/setup-windows-gui-test@main
+        with:
+          # 0.5.6, not 0.5.5: the Mouse controller this test drives the drag with
+          # landed in 0.5.6, and 0.5.5 installs cleanly and then fails on import.
+          wintegrate-version: ">=0.5.6"
+
+      - name: Install PowerToys ${{ env.POWERTOYS_VERSION }}
+        timeout-minutes: 25
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA256: ${{ matrix.sha256 }}
+          EXPECTED_SIGNER: "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $asset = "PowerToysUserSetup-$env:POWERTOYS_VERSION-${{ matrix.arch }}.exe"
+          $dir = Join-Path $env:RUNNER_TEMP 'powertoys'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+
+          gh release download "v$env:POWERTOYS_VERSION" --repo microsoft/PowerToys `
+            --pattern $asset --dir $dir
+          if ($LASTEXITCODE -ne 0) { throw "gh release download failed ($LASTEXITCODE)" }
+
+          $setup = Join-Path $dir $asset
+          $hash = (Get-FileHash $setup -Algorithm SHA256).Hash
+          if ($hash -ne $env:EXPECTED_SHA256) {
+            throw "SHA-256 mismatch: got $hash, expected $env:EXPECTED_SHA256"
+          }
+          $sig = Get-AuthenticodeSignature $setup
+          if ($sig.Status -ne 'Valid') { throw "signature is $($sig.Status), not Valid" }
+          if ($sig.SignerCertificate.Subject -ne $env:EXPECTED_SIGNER) {
+            throw "unexpected signer: $($sig.SignerCertificate.Subject)"
+          }
+          Write-Host "sha256 and publisher signature ok"
+
+          $p = Start-Process -FilePath $setup -ArgumentList '/silent' -PassThru
+          if (-not $p.WaitForExit(20 * 60 * 1000)) {
+            $p.Kill()
+            throw "the installer did not finish within 20 minutes"
+          }
+          Write-Host "installer exit code: $($p.ExitCode)"
+
+          $exe = Join-Path $env:LOCALAPPDATA 'PowerToys\PowerToys.exe'
+          if (-not (Test-Path $exe)) { throw "PowerToys.exe is not at $exe after install" }
+          $installed = (Get-Item $exe).VersionInfo.FileVersion
+          Write-Host "installed: $installed"
+
+      - name: Close PowerToys' first-run windows
+        shell: pwsh
+        run: |
+          Get-Process -Name 'PowerToys.Settings','PowerToys' -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "stopping $($_.ProcessName) ($($_.Id))"; $_ } |
+            Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 3
+
+      - name: Verify the region drag bounds the extracted text
+        env:
+          WINTEGRATE_RECORD: "1"
+        run: pytest src/modules/PowerOCR/Tests/ui-verification -v -s
+
+      - name: Upload the recording
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-powerocr-winui3-${{ matrix.arch }}
+          path: recording-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
