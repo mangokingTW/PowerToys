@@ -230,14 +230,26 @@ def test_single_line_mode_joins_the_result_into_one_line(recording):
     sweep_processes_verified(["notepad.exe", "Notepad.exe"])
     off, on = results[False], results[True]
 
-    # Both lines have to be in both results, or the selection missed something and the
-    # comparison below would be about the drag rather than about the mode.
-    for label, text in (("off", off), ("on", on)):
-        for line in (FIRST_LINE, SECOND_LINE):
-            assert h.normalise(line) in h.normalise(text), (
-                f"with single-line {label} the result is missing {line!r}: {text!a}"
-            )
+    # Equality, not containment. Containment passed a result that had picked up a
+    # stray mark: x64 returned '- Harbour lights at dusk\r\nFerries cross the water'
+    # while ARM64 returned the same text without the leading '- ' in the same run. The
+    # likeliest source is the source editor's text caret inside the band, drawn or not
+    # depending on its blink phase, which a recogniser reads as a hyphen -- and a
+    # containment check cannot see it at all.
+    #
+    # If this turns out flaky rather than fixed, that is worth knowing: the band's left
+    # edge and the caret occupy the same column, and the answer is to take focus off the
+    # source editor, not to loosen the assertion again.
+    expected = h.normalise(f"{FIRST_LINE} {SECOND_LINE}")
+    assert h.normalise(off) == expected, (
+        f"with single-line off the result is not the two source lines: {off!a}"
+    )
+    assert h.normalise(on) == expected, (
+        f"with single-line on the result is not the two source lines: {on!a}"
+    )
 
+    # normalise() collapses whitespace, so both are equal once normalised. The
+    # difference the mode makes is in the line structure, checked on the raw strings.
     assert len(on.strip().splitlines()) == 1, (
         f"single-line mode on: the result still spans {len(on.strip().splitlines())} lines: {on!a}"
     )
