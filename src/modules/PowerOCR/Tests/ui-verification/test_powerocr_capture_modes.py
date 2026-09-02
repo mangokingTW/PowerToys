@@ -100,14 +100,16 @@ def _source_with_two_lines(rect):
     """
     _proc, window = Window.launch_and_discover(
         ["notepad.exe"],
-        timeout=30.0,
+        # 60s, not 30: a packaged app's cold start on ARM64 has been measured past
+        # 12s, and 30 was not enough under the load of a whole suite.
+        timeout=60.0,
         process_names=NOTEPAD.process_names,
         window_classes=NOTEPAD.window_classes,
     )
     window.move_and_resize(*rect)
     window.set_foreground(verify=False)
     time.sleep(0.6)
-    editor = window.find_text_input(timeout=30.0)
+    editor = window.find_text_input(timeout=60.0)
     # SetValue, not Ctrl+A and Delete: the keystroke version does not clear this
     # control -- 261 characters went to 234 when it was measured.
     editor.set_value_verified("")
@@ -182,17 +184,23 @@ def test_single_line_mode_joins_the_result_into_one_line(recording):
     print(f"OCR language pinned to {h.OCR_LANGUAGE!r} (was {was!r})")
 
     results = {}
+
+    # The source window is opened once and reused for both runs. Opening and killing
+    # it per iteration timed out on ARM64 -- notepad.exe did not appear within 30s --
+    # because a packaged app's cold start there is slow and a kill followed straight
+    # away by a relaunch makes it slower. Only PowerOCR has to be restarted: the
+    # overlay closes itself once a capture completes.
+    h.sweep()
+    sweep_processes_verified(["notepad.exe", "Notepad.exe"])
+    time.sleep(0.8)
+    _window, editor, first, second = _source_with_two_lines((80, 80, 760, 260))
+
     for single_line in (False, True):
         h.sweep()
-        sweep_processes_verified(["notepad.exe", "Notepad.exe"])
-        time.sleep(0.8)
+        time.sleep(0.5)
         powerocr = subprocess.Popen([str(executable), str(os.getpid())])
         try:
             time.sleep(2.0)
-            # The window itself is not needed past setup; the drag is derived from
-            # the editor's rectangle and the caret.
-            _window, editor, first, second = _source_with_two_lines((80, 80, 760, 260))
-
             assert h.signal_show_event(), f"could not open {h.SHOW_EVENT_NAME}"
             overlays = h.wait_for_overlay(timeout=15.0)
             assert overlays, "the overlay did not come up"
@@ -218,8 +226,8 @@ def test_single_line_mode_joins_the_result_into_one_line(recording):
         finally:
             powerocr.terminate()
             h.sweep()
-            sweep_processes_verified(["notepad.exe", "Notepad.exe"])
 
+    sweep_processes_verified(["notepad.exe", "Notepad.exe"])
     off, on = results[False], results[True]
 
     # Both lines have to be in both results, or the selection missed something and the
