@@ -416,12 +416,18 @@ def test_pointer_drag_bounds_the_extracted_text(recording):
         # One overlay per display, so on a multi-monitor host there is more than one;
         # what matters is that the primary display is covered by a topmost one.
         #
-        # Within a couple of pixels, deliberately. The published 0.101.2362.0 build
-        # reports (0, 0, 1024, 768); the build from main at commit c15f2519 reports
-        # (1, 0, 1024, 768) on both x64 and ARM64 -- column 0 is not covered. That is
-        # a real difference and it is printed below, but it is not what this test is
-        # about, and an exact-equality assertion here would fail every run for a
-        # reason unrelated to region selection.
+        # Within a couple of pixels, deliberately: the overlay's left edge is not
+        # always 0. Eight samples on a 1024x768 runner:
+        #
+        #   0.101.2362.0 (release)     x64 0, arm64 0, x64 0, arm64 **1**
+        #   0.0.1.0 (build from main)  x64 1, arm64 1, x64 1, arm64 1
+        #
+        # An earlier version of this comment called that a difference between the two
+        # builds. The release/arm64 sample showing 1 says that is not supported: the
+        # value moves between runs of the same installer, so whatever produces it is
+        # not settled by which build is under test. The rect is printed on every run,
+        # so a real change in it stays visible; asserting the exact edge would just
+        # fail runs for a reason unrelated to region selection.
         inset = OVERLAY_EDGE_TOLERANCE
         primary = [
             entry
