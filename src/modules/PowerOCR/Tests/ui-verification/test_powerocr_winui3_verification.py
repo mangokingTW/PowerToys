@@ -97,14 +97,26 @@ def _open_source_window(text: str, rect: tuple[int, int, int, int]) -> Window:
     # send_physical_keys under an alphanumeric IME mode, not send_keys: real virtual
     # keys carry the right scan codes, so the recording's keyboard overlay shows the
     # keys that were actually pressed instead of mislabelling injected characters.
-    with win.ime_mode(ImeConversion.ALPHANUMERIC):
-        editor.send_physical_keys(text)
-    time.sleep(0.8)
+    #
+    # Retried, because injection can drop the tail. ARM64 under the load of the whole
+    # suite left 'Selected region inside ' in the editor -- "the band" missing -- and
+    # the check below is what caught it. Two attempts, and the failure names what
+    # actually landed rather than reporting a mismatch further down the test.
+    typed = ""
+    for attempt in (1, 2):
+        editor.set_value_verified("")
+        editor.set_focus()
+        with win.ime_mode(ImeConversion.ALPHANUMERIC):
+            editor.send_physical_keys(text)
+        time.sleep(0.8)
+        typed = editor.get_value() or ""
+        if h.normalise(typed) == h.normalise(text):
+            break
+        print(f"attempt {attempt}: the editor holds {typed!a}, retyping")
 
-    typed = editor.get_value()
     assert h.normalise(typed) == h.normalise(text), (
-        f"the source window does not hold the text this test asserts against: "
-        f"wanted {text!r}, editor holds {typed!a}"
+        f"the source window does not hold the text this test asserts against after "
+        f"two attempts: wanted {text!r}, editor holds {typed!a}"
     )
     return win
 

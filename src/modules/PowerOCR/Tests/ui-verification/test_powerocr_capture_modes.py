@@ -48,6 +48,9 @@ pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="drives Windows 
 #: Two lines of ordinary words. Ordinary specifically: a recogniser segments an
 #: unfamiliar token wherever it likes, and "WINTEGRATE" once came back as
 #: "W INTEGRATE".
+#: The source window, named so the band and the window cannot drift apart.
+SOURCE_RECT = (80, 80, 760, 260)
+
 FIRST_LINE = "Harbour lights at dusk"
 SECOND_LINE = "Ferries cross the water"
 
@@ -138,7 +141,7 @@ def _source_with_two_lines(rect):
     return window, editor, first, second
 
 
-def _extract_both_lines(mouse: Mouse, editor, first, second) -> str | None:
+def _extract_both_lines(mouse: Mouse, editor, first, second, window_x: int) -> str | None:
     """Drags a band over both lines and returns what PowerOCR published."""
     _left, _top, right, _bottom = editor.bounding_rectangle
 
@@ -152,8 +155,15 @@ def _extract_both_lines(mouse: Mouse, editor, first, second) -> str | None:
     # Vertically from just above the first line to just below the second. Running past
     # the editor's *bottom* is what once swept Notepad's status bar into the result,
     # so the band stops at the second line.
+    # Left of the first glyph, and still inside the window. Measured origins differ:
+    # the ARM64 VM puts the text at x=102, the x64 runner at x=92 with the window at
+    # x=80 -- so a fixed 14px margin landed at 78, outside the window, and the band
+    # caught the window border. It came back as '- Harbour lights at dusk\r\n:
+    # Ferries cross the water': one punctuation mark per line, from a vertical line
+    # in the band's left column.
     text_left = first[0]
-    start_x, start_y = max(0, text_left - 14), first[1] - 4
+    start_x = max(window_x + 6, text_left - 10)
+    start_y = first[1] - 4
     end_x, end_y = right - 2, second[2] + 4
     assert start_x < text_left, (
         f"the band starts at {start_x}, not left of the first glyph at {text_left}"
@@ -193,7 +203,7 @@ def test_single_line_mode_joins_the_result_into_one_line(recording):
     h.sweep()
     sweep_processes_verified(["notepad.exe", "Notepad.exe"])
     time.sleep(0.8)
-    _window, editor, first, second = _source_with_two_lines((80, 80, 760, 260))
+    _window, editor, first, second = _source_with_two_lines(SOURCE_RECT)
 
     for single_line in (False, True):
         h.sweep()
@@ -216,7 +226,7 @@ def test_single_line_mode_joins_the_result_into_one_line(recording):
                 f"Single-line mode reports {toggle.toggle_state}, not {1 if single_line else 0}"
             )
 
-            extracted = _extract_both_lines(Mouse(), editor, first, second)
+            extracted = _extract_both_lines(Mouse(), editor, first, second, window_x=SOURCE_RECT[0])
             assert extracted is not None, (
                 f"nothing was published within 20s with single-line "
                 f"{'on' if single_line else 'off'}"
