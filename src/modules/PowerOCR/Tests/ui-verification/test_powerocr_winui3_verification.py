@@ -79,8 +79,16 @@ def _signal_show_event() -> bool:
     if sys.platform != "win32":
         return False
     import ctypes
+    from ctypes import wintypes
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenEventW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.OpenEventW.restype = wintypes.HANDLE
+    kernel32.SetEvent.argtypes = [wintypes.HANDLE]
+    kernel32.SetEvent.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
     EVENT_MODIFY_STATE = 0x0002
     h = kernel32.OpenEventW(EVENT_MODIFY_STATE, False, SHOW_EVENT_NAME)
     if h:
@@ -132,8 +140,16 @@ def _clear_clipboard():
     if sys.platform != "win32":
         return
     import ctypes
+    from ctypes import wintypes
 
     user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.OpenClipboard.argtypes = [wintypes.HWND]
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.EmptyClipboard.argtypes = []
+    user32.EmptyClipboard.restype = wintypes.BOOL
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = wintypes.BOOL
+
     if user32.OpenClipboard(None):
         user32.EmptyClipboard()
         user32.CloseClipboard()
@@ -143,10 +159,24 @@ def _get_clipboard_text(timeout: float = 4.0) -> str | None:
     if sys.platform != "win32":
         return None
     import ctypes
+    from ctypes import wintypes
 
     CF_UNICODETEXT = 13
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    user32.OpenClipboard.argtypes = [wintypes.HWND]
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.GetClipboardData.argtypes = [wintypes.UINT]
+    user32.GetClipboardData.restype = wintypes.HANDLE
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = wintypes.BOOL
+
+    kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalUnlock.restype = wintypes.BOOL
+
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if user32.OpenClipboard(None):
@@ -156,7 +186,7 @@ def _get_clipboard_text(timeout: float = 4.0) -> str | None:
                     ptr = kernel32.GlobalLock(h_data)
                     if ptr:
                         try:
-                            return ctypes.c_wchar_p(ptr).value
+                            return ctypes.wstring_at(ptr)
                         finally:
                             kernel32.GlobalUnlock(h_data)
             finally:
