@@ -84,6 +84,7 @@ def powerocr_app(recording):
         process_names=(PROCESS,),
         window_classes=(WINDOW_CLASS,),
         require_all=True,
+    )
     try:
         with win.foreground(verify=False):
             assert _wait_until(lambda: win.is_visible(), timeout=10.0), (
