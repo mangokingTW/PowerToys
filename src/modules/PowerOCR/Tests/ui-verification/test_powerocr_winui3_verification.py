@@ -28,6 +28,7 @@ arrived somewhere a person would see it, which is also what the recording shows.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import re
@@ -37,9 +38,9 @@ import time
 from pathlib import Path
 
 import pytest
-from wintegrate import NOTEPAD, ImeConversion, Mouse, Window
+from wintegrate import NOTEPAD, ImeConversion, Mouse, Window, WindowCensus, get_process_image_name
 from wintegrate.apps import sweep_processes_verified
-from wintegrate.interop import SM_CXSCREEN, SM_CYSCREEN, user32
+from wintegrate.interop import RECT, SM_CXSCREEN, SM_CYSCREEN, user32
 
 PROCESS = "PowerToys.PowerOCR.exe"
 
@@ -57,6 +58,9 @@ SHOW_EVENT_NAME = r"Local\PowerOCREvent-dc864e06-e1af-4ecc-9078-f98bee745e3a"
 #: likes, and that is not a fact about the region that was selected.
 TEXT_INSIDE = "Selected region inside the band"
 TEXT_OUTSIDE = "Excluded sentence further down"
+
+GWL_EXSTYLE = -20
+WS_EX_TOPMOST = 0x00000008
 
 #: PowerOCR's settings live under the module's *display* name, not its project name.
 SETTINGS_PATH = (
@@ -117,6 +121,34 @@ def _powerocr_executable() -> Path:
                 return found[0]
 
     raise FileNotFoundError(f"{PROCESS} is not under any of {[str(r) for r in roots]}")
+
+
+def _visible_overlay_windows() -> list[tuple[int, tuple[int, int, int, int], bool, str]]:
+    """Every visible top-level window owned by PowerOCR, as (hwnd, rect, topmost, title).
+
+    Enumerated through WindowCensus. `Window.find_all` does not exist, and calling it
+    inside a bare `except Exception` is how an earlier version of this file reported
+    "overlay not detected" on every run while the real error was an AttributeError.
+
+    Matched on ownership and geometry rather than on window class. The class carries a
+    per-run GUID (`HwndWrapper[PowerToys.PowerOCR;;<guid>]` on the shipped WPF build,
+    `WinUIDesktopWin32WindowClass` after the migration), so a class filter would be a
+    filter on which build is installed.
+    """
+    found = []
+    for snap in WindowCensus.capture():
+        if not snap.is_visible:
+            continue
+        image = (get_process_image_name(snap.pid) or "").lower()
+        if not image.endswith(PROCESS.lower()):
+            continue
+        rect = RECT()
+        user32.GetWindowRect(snap.hwnd, ctypes.byref(rect))
+        topmost = bool(user32.GetWindowLongW(snap.hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)
+        found.append(
+            (snap.hwnd, (rect.left, rect.top, rect.right, rect.bottom), topmost, snap.title)
+        )
+    return found
 
 
 def _pin_ocr_language(executable: Path) -> str | None:
@@ -350,11 +382,55 @@ def test_pointer_drag_bounds_the_extracted_text(recording):
         )
 
         _clear_clipboard()
+
+        # The module's own checklist, "Activation paths": *launch the Text Extractor
+        # executable directly (standalone mode); verify the overlay appears on
+        # activation*. Asserted here rather than inferred from OCR succeeding later --
+        # if the overlay never came up, the only symptom downstream would be an empty
+        # clipboard, which says nothing about why.
+        already_up = _visible_overlay_windows()
+        assert not already_up, (
+            f"PowerOCR already has a visible window before its show event was "
+            f"signalled, so this cannot attribute the overlay to the activation: "
+            f"{already_up}"
+        )
         assert _signal_show_event(), (
             f"could not open {SHOW_EVENT_NAME}; PowerOCR is not waiting on its "
             f"show event, so the overlay was never raised"
         )
-        time.sleep(2.0)
+
+        deadline = time.monotonic() + 15.0
+        overlays: list = []
+        while time.monotonic() < deadline:
+            overlays = _visible_overlay_windows()
+            if overlays:
+                break
+            time.sleep(0.25)
+        assert overlays, f"no visible window appeared within 15s of signalling {SHOW_EVENT_NAME}"
+
+        # One overlay per display, so on a multi-monitor host there is more than one;
+        # what matters is that the primary display is covered by a topmost one.
+        primary = [
+            entry
+            for entry in overlays
+            if entry[1][0] <= 0
+            and entry[1][1] <= 0
+            and entry[1][2] >= screen_w
+            and entry[1][3] >= screen_h
+        ]
+        assert primary, (
+            f"the overlay does not cover the {screen_w}x{screen_h} primary display; "
+            f"visible PowerOCR windows were {overlays}"
+        )
+        assert primary[0][2], (
+            f"the overlay covering the primary display is not topmost, so anything "
+            f"drawn over it would be captured instead: {primary[0]}"
+        )
+        print(
+            f"overlay up: hwnd={primary[0][0]:#x} rect={primary[0][1]} "
+            f"topmost={primary[0][2]} title={primary[0][3]!r}"
+        )
+        time.sleep(1.0)
 
         mouse = Mouse()
         mouse.move(start_x, start_y, steps=8, delay=0.02)
