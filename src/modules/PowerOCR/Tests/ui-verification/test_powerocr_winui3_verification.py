@@ -45,24 +45,30 @@ def _powerocr_executable() -> Path:
     if custom and Path(custom).exists():
         return Path(custom)
 
-    candidates = (
-        Path(os.environ.get("LOCALAPPDATA", r"C:\Users\Default\AppData\Local"))
-        / "PowerToys"
-        / "WinUI3Apps"
-        / PROCESS,
-        Path(os.environ.get("LOCALAPPDATA", r"C:\Users\Default\AppData\Local"))
-        / "Programs"
-        / "PowerToys"
-        / "WinUI3Apps"
-        / PROCESS,
-        Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
-        / "PowerToys"
-        / "WinUI3Apps"
-        / PROCESS,
-    )
+    local_app_data = Path(os.environ.get("LOCALAPPDATA", r"C:\Users\Default\AppData\Local"))
+    program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+
+    candidates = [
+        local_app_data / "PowerToys" / PROCESS,
+        local_app_data / "PowerToys" / "WinUI3Apps" / PROCESS,
+        local_app_data / "PowerToys" / "modules" / "PowerOCR" / PROCESS,
+        local_app_data / "Programs" / "PowerToys" / PROCESS,
+        local_app_data / "Programs" / "PowerToys" / "WinUI3Apps" / PROCESS,
+        program_files / "PowerToys" / PROCESS,
+        program_files / "PowerToys" / "WinUI3Apps" / PROCESS,
+        program_files / "PowerToys" / "modules" / "PowerOCR" / PROCESS,
+    ]
     for c in candidates:
         if c.exists():
             return c
+
+    # Recursive glob search in PowerToys directories
+    for root_dir in (local_app_data / "PowerToys", program_files / "PowerToys"):
+        if root_dir.exists():
+            matches = list(root_dir.rglob(PROCESS))
+            if matches:
+                return matches[0]
+
     raise FileNotFoundError(f"PowerToys.PowerOCR.exe not found in {[str(p) for p in candidates]}")
 
 
@@ -78,8 +84,6 @@ def powerocr_app(recording):
         process_names=(PROCESS,),
         window_classes=(WINDOW_CLASS,),
         require_all=True,
-    )
-    recording.begin()
     try:
         with win.foreground(verify=False):
             assert _wait_until(lambda: win.is_visible(), timeout=10.0), (

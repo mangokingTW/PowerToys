@@ -14,53 +14,43 @@ import pytest
 RECORDING_FPS = 10
 OUTPUT_DIR = Path("recording-artifacts")
 
+_active_recorder = None
 
-class _Recording:
-    """Starts on request; stops once, at the end of the session."""
 
-    def __init__(self) -> None:
-        self._recorder = None
-
-    def begin(self) -> None:
-        if self._recorder is not None:
-            return
-        if os.environ.get("WINTEGRATE_RECORD") != "1" or os.name != "nt":
-            return
+def pytest_sessionstart(session):
+    """Starts screen recording immediately when pytest initializes."""
+    global _active_recorder
+    if os.environ.get("WINTEGRATE_RECORD") == "1" and os.name == "nt":
         try:
             from wintegrate import ContinuousRecorder
-        except ImportError:
-            print("recording requested but wintegrate[video] is not installed")
-            return
 
-        arch = "arm64" if platform.machine().lower() in {"arm64", "aarch64"} else "x64"
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        output = OUTPUT_DIR / f"verification-powerocr-winui3-{arch}.mp4"
-        recorder = ContinuousRecorder(output, fps=RECORDING_FPS)
-        try:
-            if not recorder.start():
-                return
-        except Exception as exc:  # noqa: BLE001
+            arch = "arm64" if platform.machine().lower() in {"arm64", "aarch64"} else "x64"
+            OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+            output = OUTPUT_DIR / f"verification-powerocr-winui3-{arch}.mp4"
+            recorder = ContinuousRecorder(output, fps=RECORDING_FPS)
+            if recorder.start():
+                _active_recorder = (recorder, output)
+                print(f"session recording -> {output}")
+        except Exception as exc:
             print(f"recording failed to start ({type(exc).__name__}: {exc})")
-            return
-        self._recorder = recorder
-        self._output = output
-        print(f"recording -> {output}")
 
-    def stop(self) -> None:
-        if self._recorder is None:
-            return
+
+def pytest_sessionfinish(session, exitstatus):
+    """Stops screen recording and flushes video artifact when pytest exits."""
+    global _active_recorder
+    if _active_recorder is not None:
+        recorder, output = _active_recorder
         try:
-            self._recorder.stop()
-            size = self._output.stat().st_size if self._output.exists() else 0
-            print(f"recording saved: {self._output} ({size / 1024:.0f} KB)")
-        except Exception as exc:  # noqa: BLE001
+            recorder.stop()
+            size = output.stat().st_size if output.exists() else 0
+            print(f"recording saved: {output} ({size / 1024:.0f} KB)")
+        except Exception as exc:
             print(f"recording failed to stop cleanly ({type(exc).__name__}: {exc})")
         finally:
-            self._recorder = None
+            _active_recorder = None
 
 
 @pytest.fixture(scope="session")
 def recording():
-    controller = _Recording()
-    yield controller
-    controller.stop()
+    """Fixture alias for compatibility with test signatures."""
+    yield
