@@ -54,6 +54,16 @@ SOURCE_RECT = (80, 80, 760, 260)
 FIRST_LINE = "Harbour lights at dusk"
 SECOND_LINE = "Ferries cross the water"
 
+#: Three space-aligned rows, which is the cheapest thing on screen that looks like a
+#: table. The cell text is deliberately not asserted -- a recogniser reading a
+#: monospace grid returned 'ruit' for "Fruit" and 'App I e' for "Apple" -- so the
+#: words only have to be distinct enough to keep the columns apart.
+TABLE_ROWS = (
+    "Fruit      Colour     Count",
+    "Apple      Red        Three",
+    "Lemon      Yellow     Seven",
+)
+
 user32.GetGUIThreadInfo.argtypes = [wintypes.DWORD, ctypes.POINTER(GUITHREADINFO)]
 user32.GetGUIThreadInfo.restype = wintypes.BOOL
 
@@ -84,8 +94,8 @@ def _caret(hwnd: int) -> tuple[int, int, int] | None:
     return (top.x, top.y, bottom.y)
 
 
-def _source_with_two_lines(rect):
-    """A Notepad holding the two lines, with both lines' geometry.
+def _source_with_text(rect, text: str):
+    """A Notepad at a known rectangle holding `text`, with the first line's geometry.
 
     The text goes in through one `SetValue`, not through keystrokes. Typing it was
     the source of two separate problems:
@@ -95,11 +105,12 @@ def _source_with_two_lines(rect):
       'Harbour lights at duskFerries cross the water\r' -- the break at the end
       instead of between the lines. `ime_mode` sets the conversion mode with a sent
       message, which does not queue behind already-injected key input.
-    - reading the caret twice to locate both lines was flaky: the same sequence that
+    - reading the caret twice to locate two lines was flaky: the same sequence that
       gives 171 -> 186 in isolation gave 171 -> 171 inside the test.
 
-    Neither is interesting here, and neither is what this test is about. One
-    SetValue and one caret read remove both.
+    Neither is interesting here. One SetValue and one caret read remove both: an
+    empty editor puts the caret at the text origin, which is the first line, and
+    every line below it is one caret-height further down.
     """
     _proc, window = Window.launch_and_discover(
         ["notepad.exe"],
@@ -119,61 +130,53 @@ def _source_with_two_lines(rect):
     editor.set_focus()
     time.sleep(0.3)
 
-    # An empty editor puts the caret at the text origin, which is the first line.
     origin = _caret(window.hwnd)
     assert origin, "could not read the caret in the empty editor"
     line_height = origin[2] - origin[1]
     assert line_height > 4, f"implausible line height {line_height} from caret {origin}"
 
-    editor.set_value_verified(f"{FIRST_LINE}\r\n{SECOND_LINE}")
+    editor.set_value_verified(text)
     time.sleep(0.5)
 
     held = editor.get_value() or ""
-    for expected in (FIRST_LINE, SECOND_LINE):
-        assert h.normalise(expected) in h.normalise(held), (
-            f"the source does not hold {expected!r}: {held!a}"
+    expected_lines = [line for line in text.splitlines() if line.strip()]
+    for line in expected_lines:
+        assert h.normalise(line) in h.normalise(held), (
+            f"the source does not hold {line!r}: {held!a}"
         )
-    assert len(held.strip().splitlines()) == 2, f"the source is not two lines: {held!a}"
+    assert len(held.strip().splitlines()) == len(expected_lines), (
+        f"the source is not {len(expected_lines)} lines: {held!a}"
+    )
 
-    first = origin
     second = (origin[0], origin[1] + line_height, origin[2] + line_height)
-    print(f"line 1 {first}, line height {line_height}, line 2 {second}")
-    return window, editor, first, second
+    print(f"line 1 {origin}, line height {line_height}, line 2 {second}")
+    return window, editor, origin, second
 
 
-def _extract_both_lines(mouse: Mouse, editor, first, second, window_x: int) -> str | None:
-    """Drags a band over both lines and returns what PowerOCR published."""
+def _drag_band(mouse: Mouse, editor, first, bottom: int, window_x: int) -> str | None:
+    """Drags a band from above the first line down to `bottom`, and returns the result."""
     _left, _top, right, _bottom = editor.bounding_rectangle
 
-    # The left edge comes from the text origin -- the caret's x in an empty editor --
-    # and not from the editor's rectangle. `editor_left + 2` clipped the first glyph
-    # on x64 while working on ARM64: both runs came back as 'arbour lights at dusk',
-    # missing the H. The editor's rectangle and the first glyph are not the same
-    # place, and the difference is smaller than the padding either arch happens to
-    # use.
-    #
-    # Vertically from just above the first line to just below the second. Running past
-    # the editor's *bottom* is what once swept Notepad's status bar into the result,
-    # so the band stops at the second line.
     # Left of the first glyph, and still inside the window. Measured origins differ:
     # the ARM64 VM puts the text at x=102, the x64 runner at x=92 with the window at
     # x=80 -- so a fixed 14px margin landed at 78, outside the window, and the band
     # caught the window border. It came back as '- Harbour lights at dusk\r\n:
     # Ferries cross the water': one punctuation mark per line, from a vertical line
     # in the band's left column.
+    #
+    # Vertically it stops at `bottom`. Running past the editor's own bottom is what
+    # once swept Notepad's status bar into the result.
     text_left = first[0]
     start_x = max(window_x + 6, text_left - 10)
-    start_y = first[1] - 4
-    end_x, end_y = right - 2, second[2] + 4
     assert start_x < text_left, (
         f"the band starts at {start_x}, not left of the first glyph at {text_left}"
     )
 
     h.clear_clipboard()
-    mouse.move(start_x, start_y, steps=6, delay=0.02)
+    mouse.move(start_x, first[1] - 4, steps=6, delay=0.02)
     time.sleep(0.3)
     mouse.down()
-    mouse.move(end_x, end_y, steps=18, delay=0.03)
+    mouse.move(right - 2, bottom + 4, steps=18, delay=0.03)
     time.sleep(0.5)
     mouse.up()
     return h.wait_for_clipboard_text(timeout=20.0)
@@ -203,7 +206,9 @@ def test_single_line_mode_joins_the_result_into_one_line(recording):
     h.sweep()
     sweep_processes_verified(["notepad.exe", "Notepad.exe"])
     time.sleep(0.8)
-    _window, editor, first, second = _source_with_two_lines(SOURCE_RECT)
+    _window, editor, first, second = _source_with_text(
+        SOURCE_RECT, f"{FIRST_LINE}\r\n{SECOND_LINE}"
+    )
 
     for single_line in (False, True):
         h.sweep()
@@ -226,7 +231,7 @@ def test_single_line_mode_joins_the_result_into_one_line(recording):
                 f"Single-line mode reports {toggle.toggle_state}, not {1 if single_line else 0}"
             )
 
-            extracted = _extract_both_lines(Mouse(), editor, first, second, window_x=SOURCE_RECT[0])
+            extracted = _drag_band(Mouse(), editor, first, second[2], window_x=SOURCE_RECT[0])
             assert extracted is not None, (
                 f"nothing was published within 20s with single-line "
                 f"{'on' if single_line else 'off'}"
@@ -266,4 +271,83 @@ def test_single_line_mode_joins_the_result_into_one_line(recording):
     assert len(off.strip().splitlines()) > 1, (
         f"single-line mode off: the result is already one line, so turning the mode on "
         f"cannot be shown to change anything: {off!a}"
+    )
+
+
+def test_table_mode_returns_tab_separated_rows(recording):
+    """*Table mode: activate Table mode, select a tabular region; verify
+    tab-separated values are on the clipboard.*
+
+    Differential again, and asserted on structure rather than on cell text. The
+    recogniser misreads a monospace grid often enough that any equality on the
+    cells would be testing the font: measured, "Fruit" came back as 'ruit' and
+    "Apple" as 'App I e'. What table mode changes is unmistakable even so:
+
+        table off: 'ruit\r\nApp I e\r\nLemon\r\nColour\r\nRed\r\nYellow\r\nCount\r\nSeven'
+        table on:  'Fruit\t\tCount\r\nApp I e\tRed\r\nLemon\tYellow\tSeven'
+
+    With the mode off the result is *column-major* -- every cell of column one,
+    then column two -- because reading order across aligned columns is not
+    line-major. With it on the result is one line per row, cells separated by tabs.
+    """
+    executable = h.powerocr_executable()
+    h.sweep()
+    sweep_processes_verified(["notepad.exe", "Notepad.exe"])
+    was = h.pin_ocr_language(executable)
+    print(f"OCR language pinned to {h.OCR_LANGUAGE!r} (was {was!r})")
+
+    _window, editor, first, _second = _source_with_text(SOURCE_RECT, "\r\n".join(TABLE_ROWS))
+    line_height = first[2] - first[1]
+    last_row_bottom = first[2] + line_height * (len(TABLE_ROWS) - 1)
+
+    results = {}
+    for table_on in (False, True):
+        h.sweep()
+        time.sleep(0.5)
+        powerocr = subprocess.Popen([str(executable), str(os.getpid())])
+        try:
+            time.sleep(2.0)
+            assert h.signal_show_event(), f"could not open {h.SHOW_EVENT_NAME}"
+            overlays = h.wait_for_overlay(timeout=15.0)
+            assert overlays, "the overlay did not come up"
+
+            toggle = UiaElement.from_handle(Window(overlays[0][0]).hwnd).find_all(
+                automation_id=h.TABLE_ID
+            )[0]
+            assert toggle.set_toggle_verified(table_on), (
+                f"Table mode would not report itself {'on' if table_on else 'off'}"
+            )
+
+            extracted = _drag_band(Mouse(), editor, first, last_row_bottom, window_x=SOURCE_RECT[0])
+            assert extracted is not None, (
+                f"nothing was published within 20s with table {'on' if table_on else 'off'}"
+            )
+            results[table_on] = extracted
+            print(
+                f"table={table_on}: {extracted!a} "
+                f"(tabs={extracted.count(chr(9))}, "
+                f"lines={len(extracted.strip().splitlines())})"
+            )
+        finally:
+            powerocr.terminate()
+            h.sweep()
+
+    sweep_processes_verified(["notepad.exe", "Notepad.exe"])
+    off, on = results[False], results[True]
+
+    assert "\t" not in off, (
+        f"table mode off already produced tabs, so turning it on cannot be shown to "
+        f"change anything: {off!a}"
+    )
+    assert "\t" in on, (
+        f"table mode on produced no tab at all, which is what the checklist asks for: {on!a}"
+    )
+    assert len(on.strip().splitlines()) == len(TABLE_ROWS), (
+        f"table mode on returned {len(on.strip().splitlines())} lines for "
+        f"{len(TABLE_ROWS)} rows: {on!a}"
+    )
+    assert len(off.strip().splitlines()) > len(TABLE_ROWS), (
+        f"table mode off returned {len(off.strip().splitlines())} lines, not more "
+        f"than the {len(TABLE_ROWS)} rows -- the column-major reading this contrasts "
+        f"with is not happening: {off!a}"
     )
