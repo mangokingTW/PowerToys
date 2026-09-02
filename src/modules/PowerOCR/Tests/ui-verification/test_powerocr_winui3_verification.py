@@ -287,17 +287,22 @@ def test_end_to_end_ocr_extraction_from_app_and_paste_to_notepad(recording):
         try:
             from wintegrate import send_keys
 
-            # Move mouse into Notepad editor and click
-            mouse.move(300, 300, steps=5, delay=0.02)
-            mouse.click()
-            time.sleep(0.5)
-
             # Send Ctrl+V to paste the extracted text onto the screen
             send_keys("^v")
-            time.sleep(3.0)
+            time.sleep(2.0)
+
+            # Programmatically verify that Notepad received the pasted text
+            _clear_clipboard()
+            send_keys("^a^c")
+            time.sleep(1.0)
+            pasted_in_notepad = _get_clipboard_text(timeout=3.0)
+            print(f"Verified text actually pasted inside Notepad: {pasted_in_notepad!r}")
+            assert pasted_in_notepad is not None and len(pasted_in_notepad.strip()) > 0, (
+                f"Expected Notepad to contain pasted OCR text, but clipboard copy returned {pasted_in_notepad!r}"
+            )
 
             # Type confirmation message
-            send_keys("{Enter}--- Verified by wintegrate ---{Enter}")
+            send_keys("{Right}{Enter}--- Verified by wintegrate ---{Enter}")
             time.sleep(2.0)
         finally:
             dest_proc.terminate()
