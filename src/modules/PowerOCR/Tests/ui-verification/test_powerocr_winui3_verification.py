@@ -237,3 +237,50 @@ def test_escape_dismissal(powerocr_app):
     win = powerocr_app
     win.send_keys("{Esc}")
     time.sleep(0.5)
+
+
+def test_end_to_end_ocr_extraction_from_app_and_paste_to_notepad(powerocr_app):
+    """Captures text from a source application, executes OCR, and pastes the result into Notepad."""
+    import subprocess
+    import tempfile
+
+    # 1. Create a sample text file with clear target text
+    sample_text = "PowerToys WinUI 3 Text Extractor Verification 2026"
+    sample_file = Path(tempfile.gettempdir()) / "powerocr_source_sample.txt"
+    sample_file.write_text(sample_text, encoding="utf-8")
+
+    # 2. Launch source Notepad displaying the sample text
+    source_proc = subprocess.Popen(["notepad.exe", str(sample_file)])
+    time.sleep(1.5)
+
+    try:
+        _clear_clipboard()
+
+        # 3. Summon Text Extractor overlay over the source window
+        _signal_show_event()
+        time.sleep(1.0)
+
+        # 4. Drag smoothly over the text area
+        mouse = Mouse()
+        mouse.move(200, 200, steps=3)
+        mouse.down()
+        mouse.move(600, 350, steps=10, delay=0.01)
+        mouse.up()
+        time.sleep(1.5)
+
+        # 5. Verify clipboard received OCR text
+        clipboard_result = _get_clipboard_text(timeout=3.0)
+        print(f"OCR Extracted Clipboard Text: {clipboard_result!r}")
+
+        # 6. Open a new Notepad, focus it, and paste with Ctrl+V so it is visually confirmed on the video recording
+        dest_proc = subprocess.Popen(["notepad.exe"])
+        time.sleep(1.5)
+        try:
+            from wintegrate import send_keys
+
+            send_keys("^v")
+            time.sleep(1.5)
+        finally:
+            dest_proc.terminate()
+    finally:
+        source_proc.terminate()
