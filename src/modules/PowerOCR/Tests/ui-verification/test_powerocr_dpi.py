@@ -248,7 +248,21 @@ def _capture_the_source_line(executable) -> str | None:
         print(f"  overlay {overlays[0][1]}")
         # `second` is the line the text is on; the caret stays on the empty line
         # above it, outside the band.
-        return h.drag_band(Mouse(), editor, second, second[2], window_x=SOURCE_RECT[0])
+        #
+        # The band's top gets half a line of headroom rather than the 4px the shared
+        # helper uses. At the larger scale ARM64 returned
+        # 'Region se ec Ion a\r\nIS sca e' -- and every character it lost, the l's
+        # and t's, is one with an ascender. The glyphs grow with the scale and 4px
+        # stopped clearing their tops.
+        line_height = second[2] - second[1]
+        top = second[1] - line_height // 2
+        print(
+            f"  editor {editor.bounding_rectangle} line2 {second} "
+            f"line_height {line_height} band_top {top}"
+        )
+        return h.drag_band(
+            Mouse(), editor, (second[0], top, second[2]), second[2], window_x=SOURCE_RECT[0]
+        )
     finally:
         powerocr.terminate()
         h.sweep()
