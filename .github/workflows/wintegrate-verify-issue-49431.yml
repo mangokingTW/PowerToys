@@ -1,0 +1,215 @@
+# Runs one of the interactive checks that microsoft/PowerToys#49431 lists as BLOCKED,
+# on a stock hosted runner with no WinAppDriver and no attached desktop:
+#
+#   summon the Text Extractor overlay, drag a selection rectangle across it, and
+#   assert the extracted text equals exactly the line that was inside the rectangle.
+#
+# Green means the drag bounded the OCR input. It is an equality, not a "text is not
+# empty" check -- see the README for the two earlier versions that passed while
+# selecting the wrong region.
+name: Verify PowerOCR WinUI 3
+
+on:
+  workflow_dispatch:
+    inputs:
+      powertoys-source:
+        description: Which PowerToys build to test against
+        type: choice
+        default: release
+        options:
+          - release      # the published installer, pinned by SHA-256 and signer
+          - ado-main     # the newest successful main build from the CI pipeline
+          - ado-pr       # the build for a pull request (needs ado-pr-number)
+      ado-pr-number:
+        description: PR number, used only when powertoys-source is ado-pr
+        type: string
+        default: "49431"
+  push:
+    branches: [wintegrate-verify-issue-49431]
+
+permissions:
+  contents: read
+
+env:
+  POWERTOYS_VERSION: 0.101.2362.0
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: windows-latest
+            sha256: D56FA7130FA68AFE553068C15A59A6B24C8DBCC9A0989A43EF0FC5A373230DE3
+          - arch: arm64
+            os: windows-11-arm
+            sha256: 4C2AE5156B7E4F1F5BA744BA6E1CF6BFE3D9614978356E6B00AA47CAB86350DB
+    name: "PowerOCR on ${{ matrix.arch }}"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mangokingTW/wintegrate/.github/actions/setup-windows-gui-test@main
+        with:
+          # 0.5.6, not 0.5.5: the Mouse controller this test drives the drag with
+          # landed in 0.5.6, and 0.5.5 installs cleanly and then fails on import.
+          wintegrate-version: ">=0.5.10"
+
+      # Which build gets tested is the whole question for this PR, so the source is
+      # an input rather than a constant.
+      #
+      # The published installer is pinned by SHA-256 and by publisher signature. A CI
+      # build cannot be: the pipeline does not release-sign its output. What stands in
+      # for that is provenance -- a fixed ADO organisation, project and pipeline
+      # definition, a build that actually succeeded, and the commit it was built from
+      # printed into the log. The signature is reported, not required. That is weaker,
+      # and it is the price of testing code that has not shipped.
+      - name: Resolve the PowerToys installer
+        id: resolve
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE: ${{ github.event.inputs.powertoys-source || 'release' }}
+          PR_NUMBER: ${{ github.event.inputs.ado-pr-number || '' }}
+          ARCH: ${{ matrix.arch }}
+          EXPECTED_SHA256: ${{ matrix.sha256 }}
+          EXPECTED_SIGNER: "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'powertoys'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+
+          # Anonymous, but pinned: this organisation, this project, this pipeline.
+          $ado = 'https://dev.azure.com/shine-oss/PowerToys/_apis'
+          $definition = 3   # "PowerToys CI"
+
+          if ($env:SOURCE -eq 'release') {
+            $asset = "PowerToysUserSetup-$env:POWERTOYS_VERSION-$env:ARCH.exe"
+            gh release download "v$env:POWERTOYS_VERSION" --repo microsoft/PowerToys `
+              --pattern $asset --dir $dir
+            if ($LASTEXITCODE -ne 0) { throw "gh release download failed ($LASTEXITCODE)" }
+            $setup = Join-Path $dir $asset
+
+            $hash = (Get-FileHash $setup -Algorithm SHA256).Hash
+            if ($hash -ne $env:EXPECTED_SHA256) {
+              throw "SHA-256 mismatch: got $hash, expected $env:EXPECTED_SHA256"
+            }
+            $sig = Get-AuthenticodeSignature $setup
+            if ($sig.Status -ne 'Valid') { throw "signature is $($sig.Status), not Valid" }
+            if ($sig.SignerCertificate.Subject -ne $env:EXPECTED_SIGNER) {
+              throw "unexpected signer: $($sig.SignerCertificate.Subject)"
+            }
+            Write-Host "release $env:POWERTOYS_VERSION: sha256 and publisher signature ok"
+          }
+          else {
+            if ($env:SOURCE -eq 'ado-main') {
+              $branch = 'refs/heads/main'
+            } else {
+              if (-not $env:PR_NUMBER) { throw "ado-pr needs ado-pr-number" }
+              $branch = "refs/pull/$env:PR_NUMBER/merge"
+            }
+
+            $q = "$ado/build/builds?api-version=7.0&definitions=$definition" +
+                 "&branchName=$branch&statusFilter=completed&resultFilter=succeeded&`$top=1"
+            $builds = Invoke-RestMethod -Uri $q
+            if ($builds.count -lt 1) {
+              throw ("no succeeded build for $branch. A draft pull request is not built " +
+                     "by the pipeline, which is the usual reason -- the author has to take " +
+                     "it out of draft before there is anything to download.")
+            }
+            $b = $builds.value[0]
+            Write-Host "build $($b.id) '$($b.buildNumber)' from $($b.sourceBranch)"
+            Write-Host "  commit:   $($b.sourceVersion)"
+            Write-Host "  finished: $($b.finishTime)"
+
+            $arts = Invoke-RestMethod -Uri "$ado/build/builds/$($b.id)/artifacts?api-version=7.0"
+            $wanted = "build-$env:ARCH-Release"
+            $art = $arts.value | Where-Object { $_.name -eq $wanted }
+            if (-not $art) {
+              throw "build $($b.id) has no artifact '$wanted' (has: $($arts.value.name -join ', '))"
+            }
+
+            # The artifact is the whole build tree -- about 16 GB -- but the pipeline
+            # stages the installers at its root, and a pipeline artifact can be fetched
+            # one file at a time. Ask for the installer, not the tree.
+            #
+            # The filename is read out of the build's own "Stage Installers" log rather
+            # than assumed: CI builds are stamped 0.0.1 today, and that is not a
+            # contract.
+            $timeline = Invoke-RestMethod -Uri "$ado/build/builds/$($b.id)/timeline?api-version=7.0"
+            $names = @()
+            foreach ($rec in $timeline.records | Where-Object { $_.name -eq 'Stage Installers' -and $_.log }) {
+              $log = (Invoke-WebRequest -Uri $rec.log.url -UseBasicParsing).Content
+              $names += @([regex]::Matches($log, 'PowerToysUserSetup-[\w.\-]+\.exe') |
+                          ForEach-Object { $_.Value })
+            }
+            $suffix = if ($env:ARCH -eq 'x64') { 'x64' } else { 'ARM64' }
+            # Sort -Unique then take one: -Unique and -First on the same
+            # Select-Object do not compose the way the reading suggests.
+            $file = $names | Where-Object { $_ -like "*-$suffix.exe" } |
+                    Sort-Object -Unique | Select-Object -First 1
+            if (-not $file) {
+              throw "could not find an installer name for $suffix in the build log (saw: $($names -join ', '))"
+            }
+
+            $base = ($art.resource.downloadUrl -split '\?')[0]
+            $url = "$base" + "?format=file&subPath=%2F$file"
+            $setup = Join-Path $dir $file
+            Write-Host "downloading $file"
+            Invoke-WebRequest -Uri $url -OutFile $setup -UseBasicParsing
+            $len = (Get-Item $setup).Length
+            $hash = (Get-FileHash $setup -Algorithm SHA256).Hash
+            Write-Host "  $len bytes, sha256 $hash"
+
+            # Reported, not required: a CI build is not release-signed.
+            $sig = Get-AuthenticodeSignature $setup
+            Write-Host "  authenticode: $($sig.Status) $($sig.SignerCertificate.Subject)"
+          }
+
+          "installer=$setup" >> $env:GITHUB_OUTPUT
+          Write-Host "installer -> $setup"
+
+      - name: Install PowerToys
+        timeout-minutes: 25
+        shell: pwsh
+        env:
+          SETUP: ${{ steps.resolve.outputs.installer }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = $env:SETUP
+          if (-not (Test-Path $setup)) { throw "installer is not at $setup" }
+
+          $p = Start-Process -FilePath $setup -ArgumentList '/silent' -PassThru
+          if (-not $p.WaitForExit(20 * 60 * 1000)) {
+            $p.Kill()
+            throw "the installer did not finish within 20 minutes"
+          }
+          Write-Host "installer exit code: $($p.ExitCode)"
+
+          $exe = Join-Path $env:LOCALAPPDATA 'PowerToys\PowerToys.exe'
+          if (-not (Test-Path $exe)) { throw "PowerToys.exe is not at $exe after install" }
+          $installed = (Get-Item $exe).VersionInfo.FileVersion
+          Write-Host "installed: $installed"
+
+      - name: Close PowerToys' first-run windows
+        shell: pwsh
+        run: |
+          Get-Process -Name 'PowerToys.Settings','PowerToys' -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "stopping $($_.ProcessName) ($($_.Id))"; $_ } |
+            Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 3
+
+      - name: Verify the region drag bounds the extracted text
+        env:
+          WINTEGRATE_RECORD: "1"
+        run: pytest src/modules/PowerOCR/Tests/ui-verification -v -s
+
+      - name: Upload the recording
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-powerocr-winui3-${{ matrix.arch }}
+          path: recording-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
