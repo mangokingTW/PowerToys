@@ -13,10 +13,11 @@ import os
 import re
 import subprocess
 import time
+from ctypes import wintypes
 from pathlib import Path
 
-from wintegrate import WindowCensus, get_process_image_name
-from wintegrate.interop import RECT, user32
+from wintegrate import NOTEPAD, Mouse, Window, WindowCensus, get_process_image_name
+from wintegrate.interop import GUITHREADINFO, RECT, user32
 
 PROCESS = "PowerToys.PowerOCR.exe"
 
@@ -299,3 +300,122 @@ def normalise(text: str) -> str:
     still fails the comparison.
     """
     return re.sub(r"\s+", " ", text).strip().upper()
+
+
+# --- source windows, and dragging a band over them ---
+
+
+user32.GetGUIThreadInfo.argtypes = [wintypes.DWORD, ctypes.POINTER(GUITHREADINFO)]
+user32.GetGUIThreadInfo.restype = wintypes.BOOL
+
+
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+
+def caret(hwnd: int) -> tuple[int, int, int] | None:
+    """The caret as (x, top, bottom) in screen coordinates, or None.
+
+    `GetGUIThreadInfo` reports it in the client coordinates of whichever window owns
+    the caret, which is not necessarily the window that was asked about.
+    """
+    tid = user32.GetWindowThreadProcessId(hwnd, None)
+    info = GUITHREADINFO()
+    info.cbSize = ctypes.sizeof(GUITHREADINFO)
+    if not user32.GetGUIThreadInfo(tid, ctypes.byref(info)):
+        return None
+    rect = info.rcCaret
+    owner = info.hwndCaret or hwnd
+    top = _POINT(rect.left, rect.top)
+    bottom = _POINT(rect.right, rect.bottom)
+    user32.ClientToScreen(owner, ctypes.byref(top))
+    user32.ClientToScreen(owner, ctypes.byref(bottom))
+    if bottom.y <= top.y:
+        return None
+    return (top.x, top.y, bottom.y)
+
+
+def source_with_text(rect, text: str):
+    """A Notepad at a known rectangle holding `text`, with the first line's geometry.
+
+    The text goes in through one `SetValue`, not through keystrokes. Typing it was
+    the source of two separate problems:
+
+    - the line break arrived out of order. Typing line 1, sending "\n", then typing
+      line 2 under an `ime_mode` block produced
+      'Harbour lights at duskFerries cross the water\r' -- the break at the end
+      instead of between the lines. `ime_mode` sets the conversion mode with a sent
+      message, which does not queue behind already-injected key input.
+    - reading the caret twice to locate two lines was flaky: the same sequence that
+      gives 171 -> 186 in isolation gave 171 -> 171 inside the test.
+
+    Neither is interesting here. One SetValue and one caret read remove both: an
+    empty editor puts the caret at the text origin, which is the first line, and
+    every line below it is one caret-height further down.
+    """
+    _proc, window = Window.launch_and_discover(
+        ["notepad.exe"],
+        # 60s, not 30: a packaged app's cold start on ARM64 has been measured past
+        # 12s, and 30 was not enough under the load of a whole suite.
+        timeout=60.0,
+        process_names=NOTEPAD.process_names,
+        window_classes=NOTEPAD.window_classes,
+    )
+    window.move_and_resize(*rect)
+    window.set_foreground(verify=False)
+    time.sleep(0.6)
+    editor = window.find_text_input(timeout=60.0)
+    # SetValue, not Ctrl+A and Delete: the keystroke version does not clear this
+    # control -- 261 characters went to 234 when it was measured.
+    editor.set_value_verified("")
+    editor.set_focus()
+    time.sleep(0.3)
+
+    origin = caret(window.hwnd)
+    assert origin, "could not read the caret in the empty editor"
+    line_height = origin[2] - origin[1]
+    assert line_height > 4, f"implausible line height {line_height} from caret {origin}"
+
+    editor.set_value_verified(text)
+    time.sleep(0.5)
+
+    held = editor.get_value() or ""
+    expected_lines = [line for line in text.splitlines() if line.strip()]
+    for line in expected_lines:
+        assert normalise(line) in normalise(held), f"the source does not hold {line!r}: {held!a}"
+    assert len(held.strip().splitlines()) == len(expected_lines), (
+        f"the source is not {len(expected_lines)} lines: {held!a}"
+    )
+
+    second = (origin[0], origin[1] + line_height, origin[2] + line_height)
+    print(f"line 1 {origin}, line height {line_height}, line 2 {second}")
+    return window, editor, origin, second
+
+
+def drag_band(mouse: Mouse, editor, first, bottom: int, window_x: int) -> str | None:
+    """Drags a band from above the first line down to `bottom`, and returns the result."""
+    _left, _top, right, _bottom = editor.bounding_rectangle
+
+    # Left of the first glyph, and still inside the window. Measured origins differ:
+    # the ARM64 VM puts the text at x=102, the x64 runner at x=92 with the window at
+    # x=80 -- so a fixed 14px margin landed at 78, outside the window, and the band
+    # caught the window border. It came back as '- Harbour lights at dusk\r\n:
+    # Ferries cross the water': one punctuation mark per line, from a vertical line
+    # in the band's left column.
+    #
+    # Vertically it stops at `bottom`. Running past the editor's own bottom is what
+    # once swept Notepad's status bar into the result.
+    text_left = first[0]
+    start_x = max(window_x + 6, text_left - 10)
+    assert start_x < text_left, (
+        f"the band starts at {start_x}, not left of the first glyph at {text_left}"
+    )
+
+    clear_clipboard()
+    mouse.move(start_x, first[1] - 4, steps=6, delay=0.02)
+    time.sleep(0.3)
+    mouse.down()
+    mouse.move(right - 2, bottom + 4, steps=18, delay=0.03)
+    time.sleep(0.5)
+    mouse.up()
+    return wait_for_clipboard_text(timeout=20.0)
