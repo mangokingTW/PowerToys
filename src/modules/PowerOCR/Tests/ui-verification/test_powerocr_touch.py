@@ -76,8 +76,16 @@ def _word_centre(origin, editor) -> tuple[int, int]:
     return (x + approx_char_width * len(SINGLE_WORD) // 2, y)
 
 
-def test_a_tap_on_a_single_word_extracts_that_word(overlay, touch):
-    """The unchecked checklist line: one word, tapped, no drag."""
+def test_a_tap_on_a_single_word_extracts_that_word(recording, touch):
+    """The unchecked checklist line: one word, tapped, no drag.
+
+    Deliberately not taking the `overlay` fixture. The overlay is full-screen
+    and topmost, so a Notepad launched under it never gets focus and
+    `source_with_text` cannot read the caret -- which is exactly how the first
+    version of this failed, with `could not read the caret in the empty
+    editor` rather than anything about touch. The source is built first and
+    the overlay raised over it, the same order the capture-mode tests use.
+    """
     window, editor, origin, _second = harness.source_with_text(SOURCE_RECT, SOURCE_TEXT)
     try:
         harness.clear_clipboard()
@@ -102,8 +110,11 @@ def test_a_tap_on_a_single_word_extracts_that_word(overlay, touch):
         window.close(force=True)
 
 
-def test_a_touch_drag_selects_a_region(overlay, touch):
+def test_a_touch_drag_selects_a_region(recording, touch):
     """Region capture with a finger, which is how the overlay is used on a tablet.
+
+    Also without the `overlay` fixture, for the reason above: the source has to
+    exist before the overlay covers the screen.
 
     The mouse version of this is covered elsewhere; this asserts the same result
     through a different input class, because the overlay reads pointer input and
