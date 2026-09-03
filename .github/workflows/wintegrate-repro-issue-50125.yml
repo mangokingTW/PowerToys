@@ -1,0 +1,154 @@
+# Reproduces microsoft/PowerToys#50125 on a stock hosted runner: typing `]` on a
+# German layout (AltGr+9) is consumed by ZoomIt's Mirror Toggle instead of
+# producing the character.
+#
+# The whole run is recorded, and the recording is the artifact worth reading --
+# the stolen keystroke is answered by a "Screen mirroring requires a second
+# monitor" message box, which is visible in the frames.
+#
+# The reproduction test is a *strict* xfail: it asserts the behaviour a user
+# expects, so the job is green while the bug is present and goes red the day a
+# build fixes it. The other two tests are controls and must pass -- see the test
+# module for why a run without them proves nothing.
+name: Repro ZoomIt mirror hotkey (#50125)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [wintegrate-repro-issue-50125]
+
+permissions:
+  contents: read
+
+env:
+  # The version the issue was filed against.
+  POWERTOYS_VERSION: 0.101.2362.0
+
+jobs:
+  repro:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: windows-latest
+            sha256: D56FA7130FA68AFE553068C15A59A6B24C8DBCC9A0989A43EF0FC5A373230DE3
+          - arch: arm64
+            os: windows-11-arm
+            sha256: 4C2AE5156B7E4F1F5BA744BA6E1CF6BFE3D9614978356E6B00AA47CAB86350DB
+    name: "ZoomIt hotkey on ${{ matrix.arch }}"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Also does the arm64 desktop preparation -- WSL, and closing the
+      # onboarding window that owns the foreground. Without it every injected
+      # keystroke goes to that window instead of the test's.
+      - uses: mangokingTW/wintegrate/.github/actions/setup-windows-gui-test@main
+        with:
+          wintegrate-version: ">=0.5.10"
+
+      # `]` is AltGr+9 only on a German layout, so the layout is the test's
+      # subject rather than a detail. Hosted images ship en-US alone.
+      - name: Add the German keyboard layout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $list = Get-WinUserLanguageList
+          if (-not ($list | Where-Object { $_.LanguageTag -eq 'de-DE' })) {
+            $list.Add('de-DE')
+            Set-WinUserLanguageList -LanguageList $list -Force
+          }
+          Start-Sleep -Seconds 3
+          Get-WinUserLanguageList |
+            ForEach-Object { Write-Host "$($_.LanguageTag): $($_.InputMethodTips -join ', ')" }
+
+          # Present but not loadable is a distinct failure, and the test would
+          # report it as "the active layout is not German" several minutes later.
+          $loaded = python -c "import ctypes; print(ctypes.windll.user32.LoadKeyboardLayoutW('00000407', 1))"
+          Write-Host "LoadKeyboardLayoutW('00000407') -> $loaded"
+          if (-not $loaded -or $loaded -eq '0') { throw "the German layout will not load" }
+
+      - name: Download and verify the PowerToys installer
+        id: resolve
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCH: ${{ matrix.arch }}
+          EXPECTED_SHA256: ${{ matrix.sha256 }}
+          EXPECTED_SIGNER: "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'powertoys'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+
+          $asset = "PowerToysUserSetup-$env:POWERTOYS_VERSION-$env:ARCH.exe"
+          gh release download "v$env:POWERTOYS_VERSION" --repo microsoft/PowerToys `
+            --pattern $asset --dir $dir
+          if ($LASTEXITCODE -ne 0) { throw "gh release download failed ($LASTEXITCODE)" }
+          $setup = Join-Path $dir $asset
+
+          $hash = (Get-FileHash $setup -Algorithm SHA256).Hash
+          if ($hash -ne $env:EXPECTED_SHA256) {
+            throw "SHA-256 mismatch: got $hash, expected $env:EXPECTED_SHA256"
+          }
+          $sig = Get-AuthenticodeSignature $setup
+          if ($sig.Status -ne 'Valid') { throw "signature is $($sig.Status), not Valid" }
+          if ($sig.SignerCertificate.Subject -ne $env:EXPECTED_SIGNER) {
+            throw "unexpected signer: $($sig.SignerCertificate.Subject)"
+          }
+          Write-Host "release $env:POWERTOYS_VERSION: sha256 and publisher signature ok"
+          "installer=$setup" >> $env:GITHUB_OUTPUT
+
+      - name: Install PowerToys
+        timeout-minutes: 25
+        shell: pwsh
+        env:
+          SETUP: ${{ steps.resolve.outputs.installer }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $p = Start-Process -FilePath $env:SETUP -ArgumentList '/silent' -PassThru
+          if (-not $p.WaitForExit(20 * 60 * 1000)) {
+            $p.Kill()
+            throw "the installer did not finish within 20 minutes"
+          }
+          Write-Host "installer exit code: $($p.ExitCode)"
+
+          $exe = Join-Path $env:LOCALAPPDATA 'PowerToys\PowerToys.exe'
+          if (-not (Test-Path $exe)) { throw "PowerToys.exe is not at $exe after install" }
+          Write-Host "installed: $((Get-Item $exe).VersionInfo.FileVersion)"
+          $zoomit = Join-Path $env:LOCALAPPDATA 'PowerToys\PowerToys.ZoomIt.exe'
+          if (-not (Test-Path $zoomit)) { throw "PowerToys.ZoomIt.exe is not at $zoomit" }
+
+      - name: Close PowerToys' first-run windows
+        shell: pwsh
+        run: |
+          Get-Process -Name 'PowerToys.Settings','PowerToys' -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "stopping $($_.ProcessName) ($($_.Id))"; $_ } |
+            Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 3
+
+      # The guard matters more than usual here: a native crash inside an injected
+      # keystroke prints a faulthandler traceback, execution continues, and pytest
+      # reports the run as passed. Absent this, that is a green job.
+      - name: Reproduce the mirror-hotkey collision
+        shell: pwsh
+        env:
+          WINTEGRATE_RECORD: "1"
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'pytest.log'
+          pytest src/modules/ZoomIt/Tests/ui-repro -v -s -rxX 2>&1 | Tee-Object -FilePath $log
+          $code = $LASTEXITCODE
+          if (Select-String -Path $log -Pattern 'Windows fatal exception|access violation' -Quiet) {
+            throw "a native crash appeared in the log; pytest's exit code ($code) does not reflect it"
+          }
+          if ($code -ne 0) { throw "pytest failed with $code" }
+
+      - name: Upload the recording
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repro-zoomit-mirror-hotkey-${{ matrix.arch }}
+          path: recording-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
