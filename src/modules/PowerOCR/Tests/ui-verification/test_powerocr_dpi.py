@@ -37,6 +37,20 @@ pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="drives Windows 
 SOURCE_RECT = (80, 80, 700, 240)
 SOURCE_TEXT = "Region selection at this scale"
 
+#: The text goes on the *second* line, and the band covers only that line.
+#:
+#: After SetValue the caret sits at character position 0 -- immediately left of the
+#: first glyph -- and the band's left edge is deliberately left of that glyph too, so
+#: a caret drawn at that moment is inside the captured region. A vertical bar against
+#: the left stroke of an R is a plausible H, which is exactly what x64 returned at the
+#: larger scale while ARM64 read it correctly. The caret blinks, so whether it is in
+#: the frame is a coin toss, and that fits an intermittent single-glyph error better
+#: than the recogniser being worse at larger sizes.
+#:
+#: An empty first line keeps the caret above the band. That is deterministic in a way
+#: that trying to take focus away from the editor is not.
+SOURCE_LINES = f"\r\n{SOURCE_TEXT}"
+
 QDC_ONLY_ACTIVE_PATHS = 0x00000002
 GET_SOURCE_DPI_SCALE = -3
 SET_SOURCE_DPI_SCALE = -4
@@ -223,7 +237,7 @@ def _capture_the_source_line(executable) -> str | None:
     h.sweep()
     sweep_processes_verified(["notepad.exe", "Notepad.exe"])
     time.sleep(0.6)
-    _window, editor, first, second = h.source_with_text(SOURCE_RECT, SOURCE_TEXT)
+    _window, editor, _first, second = h.source_with_text(SOURCE_RECT, SOURCE_LINES)
 
     powerocr = subprocess.Popen([str(executable), str(os.getpid())])
     try:
@@ -232,7 +246,9 @@ def _capture_the_source_line(executable) -> str | None:
         overlays = h.wait_for_overlay(timeout=15.0)
         assert overlays, "the overlay did not come up"
         print(f"  overlay {overlays[0][1]}")
-        return h.drag_band(Mouse(), editor, first, second[1], window_x=SOURCE_RECT[0])
+        # `second` is the line the text is on; the caret stays on the empty line
+        # above it, outside the band.
+        return h.drag_band(Mouse(), editor, second, second[2], window_x=SOURCE_RECT[0])
     finally:
         powerocr.terminate()
         h.sweep()
@@ -293,9 +309,11 @@ def test_region_selection_survives_a_display_scale_change(recording):
     expected = h.normalise(SOURCE_TEXT)
     for relative, (dpi, extracted) in sorted(results.items()):
         assert h.normalise(extracted) == expected, (
-            f"at scale {relative:+d} (effective DPI {dpi}) the selection returned "
-            f"{h.normalise(extracted)!a} instead of {expected!r}, so the band and "
-            f"the glyphs disagree at that scale"
+            f"at scale {relative:+d} (process-visible DPI {dpi}) the selection "
+            f"returned {h.normalise(extracted)!a} instead of {expected!r}. A "
+            f"shorter result means the band is not where it was asked to be; a "
+            f"same-length one means something else was in the band, and the caret is "
+            f"the thing most likely to be"
         )
 
     assert len(results) > 1, (
