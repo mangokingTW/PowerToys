@@ -41,6 +41,18 @@ PERSONALIZE = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
 #: below what a working theme switch produces and a long way above sampling noise.
 MIN_THEME_DELTA = 120
 
+#: Each toolbar button's luminance range has to clear this for its glyph to be
+#: drawn against its background at all. A legible icon has both dark and light
+#: pixels; a control rendered as a flat block has neither. Measured per button:
+#: 188-194 under the normal theme and 220-223 under High Contrast Black, so this
+#: is well under both and far above the ~0 a flat block would give.
+MIN_GLYPH_SPREAD = 120
+
+_SPI_GETHIGHCONTRAST = 0x0042
+_SPI_SETHIGHCONTRAST = 0x0043
+_HCF_HIGHCONTRASTON = 0x0001
+_SPIF_SENDCHANGE = 0x0002
+
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _user32.SendMessageTimeoutW.argtypes = [
     wintypes.HWND,
@@ -54,6 +66,34 @@ _user32.SendMessageTimeoutW.argtypes = [
 HWND_BROADCAST = 0xFFFF
 WM_SETTINGCHANGE = 0x001A
 SMTO_ABORTIFHUNG = 0x0002
+
+
+class _HIGHCONTRASTW(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.UINT),
+        ("dwFlags", wintypes.DWORD),
+        ("lpszDefaultScheme", wintypes.LPWSTR),
+    ]
+
+
+def _high_contrast_flags() -> int:
+    state = _HIGHCONTRASTW()
+    state.cbSize = ctypes.sizeof(_HIGHCONTRASTW)
+    _user32.SystemParametersInfoW(_SPI_GETHIGHCONTRAST, state.cbSize, ctypes.byref(state), 0)
+    return int(state.dwFlags)
+
+
+def _set_high_contrast(on: bool, scheme: str = "High Contrast Black") -> None:
+    """Turns High Contrast on or off, and tells applications about it."""
+    state = _HIGHCONTRASTW()
+    state.cbSize = ctypes.sizeof(_HIGHCONTRASTW)
+    base = _high_contrast_flags()
+    state.dwFlags = (base | _HCF_HIGHCONTRASTON) if on else (base & ~_HCF_HIGHCONTRASTON)
+    state.lpszDefaultScheme = ctypes.c_wchar_p(scheme) if on else None
+    _user32.SystemParametersInfoW(
+        _SPI_SETHIGHCONTRAST, state.cbSize, ctypes.byref(state), _SPIF_SENDCHANGE
+    )
+    time.sleep(4)
 
 
 def _read_apps_use_light_theme() -> int | None:
@@ -185,3 +225,79 @@ def test_the_overlay_follows_the_light_and_dark_themes(recording):
         f"{dark_rgb}, difference {delta} < {MIN_THEME_DELTA}), so either the theme "
         f"switch did not reach the overlay or the overlay ignores it"
     )
+
+
+def _glyph_spreads(executable) -> dict[str, tuple[int, int]]:
+    """Each toolbar button's luminance range, with the overlay raised."""
+    h.sweep()
+    time.sleep(0.5)
+    powerocr = subprocess.Popen([str(executable), str(os.getpid())])
+    try:
+        time.sleep(2.2)
+        assert h.signal_show_event(), f"could not open {h.SHOW_EVENT_NAME}"
+        overlays = h.wait_for_overlay(timeout=15.0)
+        assert overlays, "the overlay did not come up"
+
+        root = UiaElement.from_handle(Window(overlays[0][0]).hwnd)
+        grey = capture_screen_image().convert("L")
+        out = {}
+        for automation_id in h.TOOLBAR_BUTTON_IDS:
+            found = root.find_all(automation_id=automation_id)
+            assert found, f"{automation_id} is not in the overlay"
+            element = found[0]
+            assert element.is_enabled(), f"{automation_id} is disabled"
+            assert (element.name or "").strip(), f"{automation_id} has no accessible name"
+            left, top, right, bottom = element.bounding_rectangle
+            out[automation_id] = grey.crop((left, top, right, bottom)).getextrema()
+        return out
+    finally:
+        powerocr.terminate()
+        h.sweep()
+
+
+def test_the_toolbar_stays_legible_under_high_contrast(recording):
+    """*Switch Windows to High Contrast (Black or White); activate the overlay and
+    verify all controls are legible and accessible.*
+
+    Legibility is not something a test can judge, so this asserts the measurable
+    necessary condition: each button's rectangle has to contain both dark and light
+    pixels, because a glyph drawn against a background does and a flat block does
+    not. Accessibility is asserted directly -- present, enabled, named.
+
+    Measured per button, which is where the threshold comes from:
+
+        normal theme          49-243, spread 188-194
+        High Contrast Black   32-255, spread 220-223
+
+    Contrast goes up rather than down, which is the point of the scheme, and
+    nothing disappeared.
+    """
+    executable = h.powerocr_executable()
+    h.pin_ocr_language(executable)
+    original = _high_contrast_flags()
+    print(f"high-contrast flags were 0x{original:x} (on={bool(original & _HCF_HIGHCONTRASTON)})")
+
+    try:
+        _set_high_contrast(False)
+        normal = _glyph_spreads(executable)
+        print("normal:", {k: f"{lo}-{hi}" for k, (lo, hi) in normal.items()})
+
+        _set_high_contrast(True)
+        flags = _high_contrast_flags()
+        assert flags & _HCF_HIGHCONTRASTON, (
+            f"High Contrast did not turn on: flags 0x{flags:x}. Nothing measured after "
+            f"this would be about High Contrast at all"
+        )
+        contrast = _glyph_spreads(executable)
+        print("high contrast:", {k: f"{lo}-{hi}" for k, (lo, hi) in contrast.items()})
+    finally:
+        _set_high_contrast(bool(original & _HCF_HIGHCONTRASTON))
+        print(f"high-contrast flags restored to 0x{_high_contrast_flags():x}")
+
+    for automation_id, (low, high) in contrast.items():
+        spread = high - low
+        assert spread >= MIN_GLYPH_SPREAD, (
+            f"{automation_id} spans only {low}-{high} (spread {spread}) under High "
+            f"Contrast, which is what a control rendered without a visible glyph "
+            f"looks like. Under the normal theme it was {normal[automation_id]}"
+        )
