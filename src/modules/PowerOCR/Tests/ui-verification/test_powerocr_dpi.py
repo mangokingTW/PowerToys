@@ -183,6 +183,19 @@ def _scale_range(source) -> tuple[int, int, int] | None:
     return (query.minScaleRel, query.curScaleRel, query.maxScaleRel)
 
 
+def _scale_took(source, relative: int) -> bool:
+    """Whether the display now reports `relative` as its current scale.
+
+    Read back through the same DisplayConfig API that set it, deliberately.
+    `GetDpiForMonitor` is not usable as the check: a DPI-unaware process is told 96
+    whatever the display is really doing, and this one is unaware. Measured on the
+    runners -- scale +0 and scale +1 both reported an effective DPI of 96, which
+    said nothing about whether the change landed.
+    """
+    current = _scale_range(source)
+    return current is not None and current[1] == relative
+
+
 def _set_scale(source, relative: int) -> bool:
     request = _DPI_SCALE_SET()
     request.header.type = SET_SOURCE_DPI_SCALE
@@ -260,8 +273,13 @@ def test_region_selection_survives_a_display_scale_change(recording):
     try:
         for relative in range(low, high + 1):
             assert _set_scale(source, relative), f"the display refused scale {relative}"
+            assert _scale_took(source, relative), (
+                f"the display still reports {_scale_range(source)} after being asked "
+                f"for scale {relative:+d}, so the change did not land"
+            )
+            # Printed for context only; see _scale_took for why it is not the check.
             dpi = _effective_dpi()
-            print(f"scale {relative:+d} -> effective DPI {dpi}")
+            print(f"scale {relative:+d} accepted (process-visible DPI {dpi})")
             extracted = _capture_the_source_line(executable)
             assert extracted is not None, (
                 f"nothing was published within 20s at scale {relative:+d} (effective DPI {dpi})"
@@ -280,8 +298,7 @@ def test_region_selection_survives_a_display_scale_change(recording):
             f"the glyphs disagree at that scale"
         )
 
-    distinct = {dpi for dpi, _ in results.values()}
-    assert len(distinct) > 1, (
-        f"every scale reported the same effective DPI {distinct}, so the scale change "
-        f"did not take and this proves nothing about mixed DPI"
+    assert len(results) > 1, (
+        f"only one scale was exercised ({sorted(results)}), so nothing here is about a "
+        f"scale *change*"
     )
