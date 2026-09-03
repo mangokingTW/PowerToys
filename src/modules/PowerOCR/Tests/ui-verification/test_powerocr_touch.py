@@ -29,6 +29,8 @@ the reason, because a green run there would be a lie.
 
 from __future__ import annotations
 
+import os
+import subprocess
 import time
 
 import powerocr_harness as harness
@@ -76,6 +78,29 @@ def _word_centre(origin, editor) -> tuple[int, int]:
     return (x + approx_char_width * len(SINGLE_WORD) // 2, y)
 
 
+def _raise_overlay_over(executable):
+    """Starts PowerOCR and waits for its overlay, returning the process.
+
+    The `overlay` fixture does this too, but taking it would raise the overlay
+    *before* the source window exists -- and the overlay is full-screen and
+    topmost, so a Notepad launched underneath never gets focus and
+    `source_with_text` cannot read the caret. The capture-mode tests build the
+    source first and start PowerOCR after, which is the order copied here.
+
+    Dropping the fixture without also starting the process is what made the
+    previous attempt fail with "the overlay did not come up over the source":
+    `signal_show_event` only signals a named event, and nothing was listening.
+    """
+    harness.sweep()
+    time.sleep(0.5)
+    process = subprocess.Popen([str(executable), str(os.getpid())])
+    time.sleep(2.0)
+    assert harness.signal_show_event(), f"could not open {harness.SHOW_EVENT_NAME}"
+    overlays = harness.wait_for_overlay(timeout=15.0)
+    assert overlays, "the overlay did not come up over the source"
+    return process
+
+
 def test_a_tap_on_a_single_word_extracts_that_word(recording, touch):
     """The unchecked checklist line: one word, tapped, no drag.
 
@@ -86,11 +111,14 @@ def test_a_tap_on_a_single_word_extracts_that_word(recording, touch):
     editor` rather than anything about touch. The source is built first and
     the overlay raised over it, the same order the capture-mode tests use.
     """
+    executable = harness.powerocr_executable()
+    was = harness.pin_ocr_language(executable)
+    print(f"OCR language pinned to {harness.OCR_LANGUAGE!r} (was {was!r})")
     window, editor, origin, _second = harness.source_with_text(SOURCE_RECT, SOURCE_TEXT)
+    process = None
     try:
         harness.clear_clipboard()
-        harness.signal_show_event()
-        assert harness.wait_for_overlay(), "the overlay did not come up over the source"
+        process = _raise_overlay_over(executable)
 
         x, y = _word_centre(origin, editor)
         print(f"tapping ({x}, {y}); first line caret {origin}")
@@ -107,6 +135,9 @@ def test_a_tap_on_a_single_word_extracts_that_word(recording, touch):
         )
     finally:
         harness.wait_for_no_overlay()
+        if process is not None and process.poll() is None:
+            process.terminate()
+        harness.sweep()
         window.close(force=True)
 
 
@@ -121,11 +152,14 @@ def test_a_touch_drag_selects_a_region(recording, touch):
     a contact is not a mouse event -- WM_POINTER carries a different pointer type
     and Windows synthesises the mouse messages separately.
     """
+    executable = harness.powerocr_executable()
+    was = harness.pin_ocr_language(executable)
+    print(f"OCR language pinned to {harness.OCR_LANGUAGE!r} (was {was!r})")
     window, editor, origin, second = harness.source_with_text(SOURCE_RECT, SOURCE_TEXT)
+    process = None
     try:
         harness.clear_clipboard()
-        harness.signal_show_event()
-        assert harness.wait_for_overlay(), "the overlay did not come up over the source"
+        process = _raise_overlay_over(executable)
 
         _left, _top, right, _bottom = editor.bounding_rectangle
         x, top, bottom = origin
@@ -146,6 +180,9 @@ def test_a_touch_drag_selects_a_region(recording, touch):
         )
     finally:
         harness.wait_for_no_overlay()
+        if process is not None and process.poll() is None:
+            process.terminate()
+        harness.sweep()
         window.close(force=True)
 
 
