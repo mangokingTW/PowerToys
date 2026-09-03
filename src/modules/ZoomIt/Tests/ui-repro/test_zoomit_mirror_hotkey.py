@@ -10,7 +10,7 @@ Alt key to mirror the window under the cursor". So Ctrl+Alt+9 is not a near
 miss, it is the documented window-mirror chord, and the character is lost.
 
 That mechanism is measured here, not assumed. The issue guesses at a `)`-versus-
-`9` character comparison; `test_the_mirror_hotkey_is_keyed_to_the_digit` shows
+`9` character comparison; `test_mirror_hotkey_is_keyed_to_the_digit` shows
 Ctrl+Shift+9 opening the *region* selector, which is the variant behaviour of a
 digit-keyed hotkey rather than a match on `)`.
 
@@ -46,6 +46,8 @@ from wintegrate.interop import send_keys
 # AltGr+9. Only the second one collides with the hotkey.
 CONTROL_CHORD, CONTROL_CHARACTER = "^%8", "["
 BRACKET_CHORD, BRACKET_CHARACTER = "^%9", "]"
+
+VK_9 = 0x39  # for the physical-AltGr form, which is sent by scan code
 
 MIRROR_REGION_CHORD = "^+9"  # Ctrl+Shift+9: the region variant of Mirror Toggle
 ZOOM_CHORD = "^1"  # Ctrl+1: ZoomIt's zoom, used only to prove hotkeys are live
@@ -131,7 +133,7 @@ def _type_chord(editor, chord: str) -> tuple[str, list[str]]:
     return editor.get_value() or "", shown
 
 
-def test_an_altgr_chord_one_key_over_produces_its_bracket(german_editor):
+def test_altgr_8_types_its_bracket(german_editor):
     """The control: AltGr+8 must type `[` with ZoomIt running.
 
     Without this, a missing `]` in the reproduction is unreadable -- it could
@@ -149,7 +151,7 @@ def test_an_altgr_chord_one_key_over_produces_its_bracket(german_editor):
     assert not shown, f"AltGr+8 should not raise anything, but it raised {shown}"
 
 
-def test_the_mirror_hotkey_is_keyed_to_the_digit(german_editor):
+def test_mirror_hotkey_is_keyed_to_the_digit(german_editor):
     """The positive control, and the mechanism.
 
     Ctrl+1 raising ZoomIt's zoom overlay proves the hotkeys are armed -- the
@@ -189,7 +191,7 @@ def test_the_mirror_hotkey_is_keyed_to_the_digit(german_editor):
         "this fails loudly once a build fixes it rather than passing unnoticed."
     ),
 )
-def test_altgr_9_types_a_bracket_rather_than_reaching_zoomit(german_editor):
+def test_altgr_9_types_its_bracket(german_editor):
     """The reproduction, written as the behaviour a user expects.
 
     Two independent assertions, and either one failing is the bug:
@@ -207,4 +209,37 @@ def test_altgr_9_types_a_bracket_rather_than_reaching_zoomit(german_editor):
     assert BRACKET_CHARACTER in text, (
         f"AltGr+9 produced {text!r} rather than {BRACKET_CHARACTER!r}: the keystroke was "
         f"consumed by ZoomIt's Mirror Toggle instead of being typed"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "microsoft/PowerToys#50125, sent as the physical key rather than as a "
+        "Ctrl+Alt chord. Strict for the same reason as the test above."
+    ),
+)
+def test_real_altgr_9_types_its_bracket(german_editor):
+    """The same reproduction, with AltGr sent as the key a user actually presses.
+
+    `^%9` is VK_CONTROL + VK_MENU -- generic Alt, neither left nor right. A real
+    AltGr is VK_RMENU with the extended flag, accompanied by a left Ctrl, and
+    those are different key events: an application reading scan codes is free to
+    distinguish them. Without this test the reproduction would rest on the
+    assumption that it cannot.
+
+    Measured, both forms behave identically -- and so does right Alt sent with no
+    Ctrl at all. The recorder's key overlay draws "Ctrl + Alt + 9" for either, so
+    the overlay is not evidence of which was sent; the difference is in the
+    injected events.
+    """
+    _window, editor = german_editor
+    shown = harness.windows_shown_by(lambda: harness.send_real_altgr(VK_9))
+    text = editor.get_value() or ""
+    print(f"physical AltGr+9 -> {text!r}; windows shown: {shown}")
+
+    assert not shown, f"physical AltGr+9 reached ZoomIt: it raised {shown}"
+    assert BRACKET_CHARACTER in text, (
+        f"physical AltGr+9 produced {text!r} rather than {BRACKET_CHARACTER!r}: the "
+        f"keystroke was consumed by ZoomIt's Mirror Toggle instead of being typed"
     )

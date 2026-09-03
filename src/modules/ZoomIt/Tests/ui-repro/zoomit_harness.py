@@ -125,14 +125,29 @@ def zoomit_windows() -> list:
     ]
 
 
-def dismiss_zoomit_dialogs(timeout: float = 15.0) -> list[str]:
+# The options dialog, as opposed to a message box. Both are `#32770`.
+OPTIONS_TITLE_MARKER = "sysinternals"
+
+# Cancel before OK on the options dialog. OK *applies* the settings, and applying
+# them includes the "Run ZoomIt when Windows starts" entry -- which on a hosted
+# x64 runner fails with "Error configuring auto start: The system cannot find the
+# file specified", and dismissing that error reopens the options dialog. The two
+# then alternate: a 15s dismissal loop went round ten times and gave up with both
+# windows still on screen. Cancel closes without applying anything, and the
+# hotkeys come from the saved configuration rather than from this dialog.
+CONFIRM_BUTTONS = ("cancel", "取消", "ok", "確定")
+MESSAGE_BOX_BUTTONS = ("ok", "確定", "cancel", "取消")
+
+
+def dismiss_zoomit_dialogs(timeout: float = 20.0) -> list[str]:
     """Closes ZoomIt's options dialog and any message box, and says which.
 
-    Confirm buttons are matched in English and Chinese: this ran on a zh-TW host
+    Buttons are matched in English and Chinese: this also ran on a zh-TW host
     where the button is `確定`, an English-only match left the dialog up, and the
     next test then measured an unarmed ZoomIt.
     """
     from wintegrate.element import UiaElement
+    from wintegrate.interop import send_keys
 
     closed: list[str] = []
     deadline = time.monotonic() + timeout
@@ -141,14 +156,27 @@ def dismiss_zoomit_dialogs(timeout: float = 15.0) -> list[str]:
         if not dialogs:
             break
         for dialog in dialogs:
+            is_options = OPTIONS_TITLE_MARKER in (dialog.title or "").lower()
+            preferred = CONFIRM_BUTTONS if is_options else MESSAGE_BOX_BUTTONS
             root = UiaElement.from_handle(dialog.hwnd)
-            for button in root.find_all(control_type_id=50000):  # Button
-                if (button.name or "").strip().lower() in ("ok", "cancel", "確定", "取消"):
+            buttons = {
+                (b.name or "").strip().lower(): b
+                for b in root.find_all(control_type_id=50000)  # Button
+            }
+            for wanted in preferred:
+                if wanted in buttons:
+                    # The name is read *before* invoking: read after, the dialog
+                    # is already gone and it comes back empty, which is why an
+                    # earlier log said a message box was closed "via ''".
+                    closed.append(f"{dialog.title!r} via {wanted!r}")
                     # invoke, not click: the options dialog is taller than the
-                    # desktop, so OK sits off-screen and a click lands nowhere.
-                    button.invoke()
-                    closed.append(f"{dialog.title!r} via {button.name!r}")
+                    # desktop, so its buttons sit off-screen and a coordinate
+                    # click lands nowhere.
+                    buttons[wanted].invoke()
                     break
+            else:
+                closed.append(f"{dialog.title!r} via Escape (buttons: {sorted(buttons)})")
+                send_keys("{ESC}")
         time.sleep(1.5)
     return closed
 
@@ -156,6 +184,37 @@ def dismiss_zoomit_dialogs(timeout: float = 15.0) -> list[str]:
 def zoomit_is_armed() -> bool:
     """True when no ZoomIt dialog is up, so its hotkeys are registered."""
     return not [w for w in zoomit_windows() if (w.class_name or "") == DIALOG_CLASS]
+
+
+# Physical AltGr, as opposed to the generic Ctrl+Alt a send_keys chord produces.
+# `%` maps to VK_MENU, which is neither left nor right Alt; the real key is
+# VK_RMENU carrying KEYEVENTF_EXTENDEDKEY, and on an AltGr layout a left Ctrl
+# accompanies it. Those are different key events and an application is free to
+# tell them apart, so the reproduction measures both rather than assuming.
+VK_LCONTROL = 0xA2
+VK_RMENU = 0xA5
+
+
+def send_real_altgr(vk: int) -> int:
+    """Sends AltGr+`vk` the way the physical key does, by scan code.
+
+    One SendInput batch, so nothing can interleave between the modifier and the
+    key. Returns how many events were queued.
+    """
+    import ctypes
+
+    from wintegrate.interop import INPUT, send_scan_key, user32
+
+    events = [
+        (VK_LCONTROL, False, False),
+        (VK_RMENU, False, True),
+        (vk, False, False),
+        (vk, True, False),
+        (VK_RMENU, True, True),
+        (VK_LCONTROL, True, False),
+    ]
+    array = (INPUT * len(events))(*[send_scan_key(k, up, ext) for k, up, ext in events])
+    return user32.SendInput(len(events), array, ctypes.sizeof(INPUT))
 
 
 def visible_windows() -> dict:
