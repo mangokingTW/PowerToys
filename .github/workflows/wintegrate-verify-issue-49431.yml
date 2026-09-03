@@ -54,7 +54,7 @@ jobs:
         with:
           # 0.5.6, not 0.5.5: the Mouse controller this test drives the drag with
           # landed in 0.5.6, and 0.5.5 installs cleanly and then fails on import.
-          wintegrate-version: ">=0.5.6"
+          wintegrate-version: ">=0.5.9"
 
       # Which build gets tested is the whole question for this PR, so the source is
       # an input rather than a constant.

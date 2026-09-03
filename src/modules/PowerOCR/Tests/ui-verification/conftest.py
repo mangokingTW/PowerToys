@@ -54,6 +54,35 @@ def pytest_sessionfinish(session, exitstatus):
             _active_recorder = None
 
 
+def pytest_runtest_logstart(nodeid, location):
+    """Names the running test in the recording's bottom-left corner.
+
+    Which test a stretch of a recording belongs to is otherwise a matter of
+    counting windows and guessing, and the stretch worth watching is usually the
+    one nobody can find. The recorder draws whatever is in `caption` into each
+    frame, so setting it here is enough.
+
+    The file goes on the second line and the test's own name on the first, because
+    the name is what a viewer is looking for and a long path would push it out of
+    the panel.
+    """
+    if _active_recorder is None:
+        return
+    recorder, _output = _active_recorder
+    filename, _lineno, _domain = location
+    recorder.caption = nodeid.split("::")[-1]
+    recorder.caption_subtitle = str(filename)
+
+
+def pytest_runtest_logfinish(nodeid, location):
+    """Clears the caption between tests, so a frame never names the wrong one."""
+    if _active_recorder is None:
+        return
+    recorder, _output = _active_recorder
+    recorder.caption = ""
+    recorder.caption_subtitle = ""
+
+
 @pytest.fixture(scope="session")
 def recording():
     """Fixture alias for compatibility with test signatures."""
