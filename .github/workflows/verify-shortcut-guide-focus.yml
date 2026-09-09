@@ -1,0 +1,183 @@
+name: Verify Shortcut Guide Focus & Tab Order
+
+on:
+  pull_request:
+    paths:
+      - 'src/modules/ShortcutGuide/**'
+      - '.github/workflows/verify-shortcut-guide-focus.yml'
+  push:
+    branches:
+      - fix/shortcut-guide-tab-order-focus
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Target to run: unpatched-baseline, patched-verification, or both'
+        required: false
+        default: 'both'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [unpatched-baseline, patched-verification]
+    name: "${{ matrix.target }} on windows-latest"
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mangokingTW/wintegrate/.github/actions/setup-windows-gui-test@main
+        with:
+          wintegrate-version: ">=0.6.3"
+
+      - name: Install Wintegrate reporting suite
+        shell: pwsh
+        run: |
+          pip install "wintegrate[all]>=0.6.3" pytest-html pytest-github-actions-annotate-failures
+          python -c "import wintegrate; print('Wintegrate version:', wintegrate.__version__)"
+
+      - name: Download and install PowerToys release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: "0.101.2362.0"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'powertoys'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $asset = "PowerToysUserSetup-$env:VERSION-x64.exe"
+          gh release download "v$env:VERSION" --repo microsoft/PowerToys --pattern $asset --dir $dir
+          $setup = Join-Path $dir $asset
+          Write-Host "Installing $asset..."
+          $p = Start-Process -FilePath $setup -ArgumentList '/silent' -PassThru
+          if (-not $p.WaitForExit(20 * 60 * 1000)) {
+            $p.Kill()
+            throw "Installation timed out"
+          }
+          Write-Host "Installer finished with code $($p.ExitCode)"
+          $exe = Join-Path $env:LOCALAPPDATA 'PowerToys\WinUI3Apps\PowerToys.ShortcutGuide.exe'
+          if (-not (Test-Path $exe)) { throw "PowerToys.ShortcutGuide.exe not found at $exe" }
+
+      - name: Pre-generate shortcut manifests and index.yml
+        shell: pwsh
+        run: |
+          Write-Host "Pre-generating shortcut manifests and index.yml using release binaries..."
+          $manifestSrc = Join-Path $env:LOCALAPPDATA 'PowerToys\WinUI3Apps\Assets\ShortcutGuide\Manifests'
+          $manifestDest = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\KeyboardShortcuts'
+          New-Item -ItemType Directory -Force -Path $manifestDest | Out-Null
+          Copy-Item -Path "$manifestSrc\*.yml" -Destination $manifestDest -Force
+
+          $generatorExe = Join-Path $env:LOCALAPPDATA 'PowerToys\WinUI3Apps\PowerToys.ShortcutGuide.IndexYmlGenerator.exe'
+          $genProc = Start-Process -FilePath $generatorExe -WorkingDirectory (Split-Path $generatorExe) -Wait -PassThru
+          Write-Host "Pre-generation finished with exit code $($genProc.ExitCode)"
+          $indexFile = Join-Path $manifestDest 'index.yml'
+          if (-not (Test-Path $indexFile)) {
+            throw "index.yml was not generated at $indexFile"
+          }
+          Write-Host "index.yml verified ($(Get-Item $indexFile).Length bytes)."
+
+      - name: Close background PowerToys processes
+        shell: pwsh
+        run: |
+          Get-Process -Name 'PowerToys*' -ErrorAction SilentlyContinue |
+            Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+
+      - name: Prepare ShortcutGuide test environment
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sourceRoot = Join-Path $env:LOCALAPPDATA 'PowerToys'
+          $testRoot = Join-Path $env:RUNNER_TEMP 'TargetPowerToys'
+          Write-Host "Creating isolated test directory tree at $testRoot from $sourceRoot..."
+          Copy-Item -Recurse -Path $sourceRoot -Destination $testRoot
+
+          $targetDir = Join-Path $testRoot 'WinUI3Apps'
+
+          # Replace IndexYmlGenerator with a clean no-op stub on BOTH targets so background indexer behaves identically
+          $stubExe = Join-Path $targetDir 'PowerToys.ShortcutGuide.IndexYmlGenerator.exe'
+          Copy-Item 'C:\Windows\System32\whoami.exe' $stubExe -Force
+          Write-Host "Deployed clean IndexYmlGenerator stub at $stubExe"
+
+          # If patched target, deploy the patched binaries into WinUI3Apps
+          if ('${{ matrix.target }}' -eq 'patched-verification') {
+            $zipUrl = "https://raw.githubusercontent.com/mangokingTW/PowerToys/evidence/patched-shortcutguide-win-x64.zip?t=$((Get-Date).Ticks)"
+            $zipPath = Join-Path $env:RUNNER_TEMP "patched-shortcutguide.zip"
+            Write-Host "Downloading patched binaries from $zipUrl..."
+            Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
+            tar -xf $zipPath -C $targetDir
+
+            if (Test-Path "$targetDir\PowerToys.Interop.dll") {
+              Copy-Item "$targetDir\PowerToys.Interop.dll" $testRoot -Force
+            }
+            if (Test-Path "$targetDir\PowerToys.GPOWrapper.dll") {
+              Copy-Item "$targetDir\PowerToys.GPOWrapper.dll" $testRoot -Force
+            }
+            Write-Host "Patched binaries deployed."
+          } else {
+            Write-Host "Unpatched baseline environment prepared."
+          }
+
+          $targetExe = Join-Path $targetDir 'PowerToys.ShortcutGuide.exe'
+          Add-Content -Path $env:GITHUB_ENV -Value "SHORTCUT_GUIDE_EXE=$targetExe"
+          Write-Host "Exported SHORTCUT_GUIDE_EXE=$targetExe"
+
+      - name: Run Shortcut Guide UI Automation Tests
+        shell: pwsh
+        env:
+          WINTEGRATE_RECORD_DIR: recording-artifacts
+          TARGET_MODE: "${{ matrix.target }}"
+        run: |
+          $reportPath = "recording-artifacts/report.html"
+          New-Item -ItemType Directory -Force -Path "recording-artifacts" | Out-Null
+
+          Write-Host "Running tests with wintegrate HTML reporting..."
+          python -m pytest src/modules/ShortcutGuide/Tests/ui-verification `
+            -v -s `
+            --html=$reportPath `
+            --self-contained-html `
+            --junitxml=recording-artifacts/junit.xml
+
+          exit $LASTEXITCODE
+
+      - name: Collect Windows Event Logs & Diagnostics
+        if: always()
+        shell: pwsh
+        run: |
+          $artifactDir = "recording-artifacts"
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+
+          # Collect ONLY ShortcutGuide logs if present into a dedicated subfolder
+          $sgLogs = "$env:LOCALAPPDATA\Microsoft\PowerToys\ShortcutGuide\Logs"
+          if (Test-Path $sgLogs) {
+            $dest = Join-Path $artifactDir "ShortcutGuide-Logs"
+            New-Item -ItemType Directory -Force -Path $dest | Out-Null
+            Copy-Item -Path "$sgLogs\*" -Destination $dest -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "Collected ShortcutGuide logs to $dest"
+          }
+
+          # Collect Windows Application Event Log if ShortcutGuide or .NET errors occurred
+          try {
+            $events = Get-WinEvent -LogName Application -MaxEvents 100 -ErrorAction SilentlyContinue |
+              Where-Object { $_.ProviderName -match 'ShortcutGuide|\.NET Runtime|Application Error' }
+            if ($events) {
+              $events | Format-List TimeCreated, ProviderName, Id, LevelDisplayName, Message |
+                Out-File -FilePath "$artifactDir/application_event_log.txt" -Encoding utf8
+              Write-Host "Collected application event log."
+            }
+          } catch {
+            Write-Host "Event log query skipped: $_"
+          }
+
+      - name: Upload Verification Recording Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "verification-artifacts-${{ matrix.target }}"
+          path: recording-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
