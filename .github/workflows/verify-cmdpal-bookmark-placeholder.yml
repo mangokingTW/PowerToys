@@ -9,6 +9,11 @@ on:
     branches:
       - fix/cmdpal-bookmark-placeholder-reset
   workflow_dispatch:
+    inputs:
+      target:
+        description: 'Target to run: unpatched-baseline, patched-verification, or both'
+        required: false
+        default: 'both'
 
 permissions:
   contents: read
@@ -21,15 +26,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: x64
-            os: windows-latest
-            sha256: D56FA7130FA68AFE553068C15A59A6B24C8DBCC9A0989A43EF0FC5A373230DE3
-          - arch: arm64
-            os: windows-11-arm
-            sha256: 4C2AE5156B7E4F1F5BA744BA6E1CF6BFE3D9614978356E6B00AA47CAB86350DB
-    name: "cmdpal-bookmark-placeholder on ${{ matrix.arch }}"
-    runs-on: ${{ matrix.os }}
+        target: [unpatched-baseline, patched-verification]
+    name: "${{ matrix.target }} on windows-latest"
+    runs-on: windows-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -44,20 +44,21 @@ jobs:
           python -c "import wintegrate; print('Wintegrate version:', wintegrate.__version__)"
 
       - name: Install PowerToys ${{ env.POWERTOYS_VERSION }}
-        timeout-minutes: 25
+        timeout-minutes: 20
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          EXPECTED_SHA256: ${{ matrix.sha256 }}
+          VERSION: ${{ env.POWERTOYS_VERSION }}
+          EXPECTED_SHA256: D56FA7130FA68AFE553068C15A59A6B24C8DBCC9A0989A43EF0FC5A373230DE3
           EXPECTED_SIGNER: "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $asset = "PowerToysUserSetup-$env:POWERTOYS_VERSION-${{ matrix.arch }}.exe"
+          $asset = "PowerToysUserSetup-$env:VERSION-x64.exe"
           $dir = Join-Path $env:RUNNER_TEMP 'powertoys'
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
 
-          gh release download "v$env:POWERTOYS_VERSION" --repo microsoft/PowerToys `
+          gh release download "v$env:VERSION" --repo microsoft/PowerToys `
             --pattern $asset --dir $dir
           if ($LASTEXITCODE -ne 0) { throw "gh release download failed ($LASTEXITCODE)" }
 
@@ -74,9 +75,9 @@ jobs:
           Write-Host "sha256 and publisher signature ok"
 
           $p = Start-Process -FilePath $setup -ArgumentList '/silent' -PassThru
-          if (-not $p.WaitForExit(20 * 60 * 1000)) {
+          if (-not $p.WaitForExit(15 * 60 * 1000)) {
             $p.Kill()
-            throw "the installer did not finish within 20 minutes"
+            throw "the installer did not finish within 15 minutes"
           }
           Write-Host "installer exit code: $($p.ExitCode)"
 
@@ -86,13 +87,13 @@ jobs:
           Write-Host "installed: $installed"
 
       - name: Register Command Palette by starting PowerToys once
-        timeout-minutes: 10
+        timeout-minutes: 8
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           Start-Process -FilePath (Join-Path $env:LOCALAPPDATA 'PowerToys\PowerToys.exe')
 
-          $deadline = (Get-Date).AddMinutes(8)
+          $deadline = (Get-Date).AddMinutes(6)
           while ((Get-Date) -lt $deadline) {
             Start-Sleep -Seconds 5
             $pkg = Get-AppxPackage -Name 'Microsoft.CommandPalette' -ErrorAction SilentlyContinue
@@ -102,7 +103,7 @@ jobs:
               exit 0
             }
           }
-          throw "Microsoft.CommandPalette was not registered within 8 minutes"
+          throw "Microsoft.CommandPalette was not registered within 6 minutes"
 
       - name: Close PowerToys' own first-run windows
         shell: pwsh
@@ -118,21 +119,18 @@ jobs:
             Stop-Process -Force -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 2
 
-          python -c "
-          from wintegrate.interop import get_foreground_window, get_window_class, get_window_title
-          hwnd = get_foreground_window()
-          print(f'foreground before the test: class={get_window_class(hwnd)!r} title={get_window_title(hwnd)!r}')
-          "
-
-      - name: Run Command Palette UI Verification Tests
+      - name: Run Command Palette UI Automation Tests
         shell: pwsh
         env:
           WINTEGRATE_RECORD: "1"
+          WINTEGRATE_RECORD_DIR: recording-artifacts
+          TARGET_MODE: "${{ matrix.target }}"
         run: |
           $reportPath = "recording-artifacts/report.html"
           New-Item -ItemType Directory -Force -Path "recording-artifacts" | Out-Null
 
-          pytest src/modules/cmdpal/Tests/ui-verification `
+          Write-Host "Running tests with wintegrate HTML reporting for ${{ matrix.target }}..."
+          python -m pytest src/modules/cmdpal/Tests/ui-verification `
             -v -rxX -s `
             --html=$reportPath `
             --self-contained-html `
@@ -144,7 +142,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: "verification-artifacts-cmdpal-${{ matrix.arch }}"
+          name: "verification-artifacts-${{ matrix.target }}"
           path: recording-artifacts/
           if-no-files-found: warn
           retention-days: 14
