@@ -1,0 +1,148 @@
+name: Verify Command Palette Bookmark Placeholder Reset
+
+on:
+  pull_request:
+    paths:
+      - 'src/modules/cmdpal/**'
+      - '.github/workflows/verify-cmdpal-bookmark-placeholder.yml'
+  push:
+    branches:
+      - fix/cmdpal-bookmark-placeholder-reset
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Target to run: unpatched-baseline, patched-verification, or both'
+        required: false
+        default: 'both'
+
+permissions:
+  contents: read
+
+env:
+  POWERTOYS_VERSION: 0.101.2362.0
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [unpatched-baseline, patched-verification]
+    name: "${{ matrix.target }} on windows-latest"
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mangokingTW/wintegrate/.github/actions/setup-windows-gui-test@main
+        with:
+          wintegrate-version: ">=0.6.3"
+
+      - name: Install Wintegrate reporting suite
+        shell: pwsh
+        run: |
+          pip install "wintegrate[all]>=0.6.3" pytest-html pytest-github-actions-annotate-failures
+          python -c "import wintegrate; print('Wintegrate version:', wintegrate.__version__)"
+
+      - name: Install PowerToys ${{ env.POWERTOYS_VERSION }}
+        timeout-minutes: 20
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ env.POWERTOYS_VERSION }}
+          EXPECTED_SHA256: D56FA7130FA68AFE553068C15A59A6B24C8DBCC9A0989A43EF0FC5A373230DE3
+          EXPECTED_SIGNER: "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $asset = "PowerToysUserSetup-$env:VERSION-x64.exe"
+          $dir = Join-Path $env:RUNNER_TEMP 'powertoys'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+
+          gh release download "v$env:VERSION" --repo microsoft/PowerToys `
+            --pattern $asset --dir $dir
+          if ($LASTEXITCODE -ne 0) { throw "gh release download failed ($LASTEXITCODE)" }
+
+          $setup = Join-Path $dir $asset
+          $hash = (Get-FileHash $setup -Algorithm SHA256).Hash
+          if ($hash -ne $env:EXPECTED_SHA256) {
+            throw "SHA-256 mismatch: got $hash, expected $env:EXPECTED_SHA256"
+          }
+          $sig = Get-AuthenticodeSignature $setup
+          if ($sig.Status -ne 'Valid') { throw "signature is $($sig.Status), not Valid" }
+          if ($sig.SignerCertificate.Subject -ne $env:EXPECTED_SIGNER) {
+            throw "unexpected signer: $($sig.SignerCertificate.Subject)"
+          }
+          Write-Host "sha256 and publisher signature ok"
+
+          $p = Start-Process -FilePath $setup -ArgumentList '/silent' -PassThru
+          if (-not $p.WaitForExit(15 * 60 * 1000)) {
+            $p.Kill()
+            throw "the installer did not finish within 15 minutes"
+          }
+          Write-Host "installer exit code: $($p.ExitCode)"
+
+          $exe = Join-Path $env:LOCALAPPDATA 'PowerToys\PowerToys.exe'
+          if (-not (Test-Path $exe)) { throw "PowerToys.exe is not at $exe after install" }
+          $installed = (Get-Item $exe).VersionInfo.FileVersion
+          Write-Host "installed: $installed"
+
+      - name: Register Command Palette by starting PowerToys once
+        timeout-minutes: 8
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Start-Process -FilePath (Join-Path $env:LOCALAPPDATA 'PowerToys\PowerToys.exe')
+
+          $deadline = (Get-Date).AddMinutes(6)
+          while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 5
+            $pkg = Get-AppxPackage -Name 'Microsoft.CommandPalette' -ErrorAction SilentlyContinue
+            if ($pkg) {
+              Write-Host "registered: $($pkg.Name) $($pkg.Version)"
+              Write-Host "family: $($pkg.PackageFamilyName)"
+              exit 0
+            }
+          }
+          throw "Microsoft.CommandPalette was not registered within 6 minutes"
+
+      - name: Close PowerToys' own first-run windows
+        shell: pwsh
+        run: |
+          Get-Process -Name 'PowerToys.Settings','PowerToys' -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "stopping $($_.ProcessName) ($($_.Id))"; $_ } |
+            Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 3
+
+          Get-Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.ProcessName -like 'PowerToys.*' } |
+            ForEach-Object { Write-Host "stopping $($_.ProcessName)"; $_ } |
+            Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+
+      - name: Run Command Palette UI Automation Tests
+        shell: pwsh
+        env:
+          WINTEGRATE_RECORD: "1"
+          WINTEGRATE_RECORD_DIR: recording-artifacts
+          TARGET_MODE: "${{ matrix.target }}"
+        run: |
+          $reportPath = "recording-artifacts/report.html"
+          New-Item -ItemType Directory -Force -Path "recording-artifacts" | Out-Null
+
+          Write-Host "Running tests with wintegrate HTML reporting for ${{ matrix.target }}..."
+          python -m pytest src/modules/cmdpal/Tests/ui-verification `
+            -v -rxX -s `
+            --html=$reportPath `
+            --self-contained-html `
+            --junitxml=recording-artifacts/junit.xml
+
+          exit $LASTEXITCODE
+
+      - name: Upload Verification Recording Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "verification-artifacts-${{ matrix.target }}"
+          path: recording-artifacts/
+          if-no-files-found: warn
+          retention-days: 14

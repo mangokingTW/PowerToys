@@ -1,4 +1,4 @@
-﻿// Copyright (c) Microsoft Corporation
+// Copyright (c) Microsoft Corporation
 // The Microsoft Corporation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
@@ -105,13 +105,32 @@ internal sealed partial class BookmarkPlaceholderPage : ParametersPage, IDisposa
 
     private CommandResult LaunchWithCurrentValues()
     {
+        if (!AllPlaceholdersHaveValues())
+        {
+            return CommandResult.KeepOpen();
+        }
+
         var target = BuildEvaluatedBookmark();
 
         // Re-classify the final target — adding placeholder values may change
         // what kind of command this is (e.g. a path that needs different launch).
         var classification = _resolver.ClassifyOrUnknown(target);
         var success = CommandLauncher.Launch(classification);
-        return success ? CommandResult.Dismiss() : CommandResult.KeepOpen();
+        if (success)
+        {
+            ResetPlaceholderValues();
+            return CommandResult.Dismiss();
+        }
+
+        return CommandResult.KeepOpen();
+    }
+
+    internal void ResetPlaceholderValues()
+    {
+        foreach (var run in _placeholderRuns.Values)
+        {
+            run.ClearValue();
+        }
     }
 
     private string BuildEvaluatedBookmark()
