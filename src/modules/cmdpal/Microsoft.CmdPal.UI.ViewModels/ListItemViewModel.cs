@@ -372,7 +372,11 @@ public partial class ListItemViewModel : CommandItemViewModel
 
     protected void UpdateAccessibleName()
     {
-        AccessibleName = Title + ", " + Subtitle;
+        AccessibleName = string.IsNullOrWhiteSpace(Subtitle)
+            ? (Title ?? string.Empty)
+            : string.IsNullOrWhiteSpace(Title)
+                ? Subtitle
+                : $"{Title}, {Subtitle}";
         UpdateProperty(nameof(AccessibleName));
     }
 }
