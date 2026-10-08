@@ -296,3 +296,69 @@ def test_shortcut_card_arrow_navigation():
             assert second_card.name != first_card.name and (second_card.name or '') != '', (
                 f'Arrow Down failed to move to next shortcut card, remained on {second_card.name!r}'
             )
+
+
+def test_shortcut_card_context_menu_retention():
+    """Target test: Context flyout (Pin/Unpin menu) must open via keyboard (Shift+F10)
+    on shortcut cards and remain functional after item unloading / collection rebuild."""
+    with shortcut_guide_session('test_shortcut_card_context_menu_retention') as (session, sg_win):
+        with session.step('tab_to_shortcuts'):
+            for _ in range(4):
+                send_keys('{TAB}')
+                time.sleep(0.1)
+            first_card = settled(
+                UiaElement.get_focused,
+                lambda el: el is not None and (el.name or '') != '',
+                timeout=2.0,
+            )
+            assert first_card.control_type_id != 50033 and (first_card.name or '') != '', (
+                f'Focus failed to reach first shortcut card: {first_card.name!r}'
+            )
+
+        with session.step('trigger_rebuild_via_search_filter'):
+            # Trigger item unloading and collection rebuild by filtering shortcuts and then clearing query
+            search_box = sg_win.get_by_role('edit').first
+            search_box.type_verified('Explorer', expected_line_count_delta=0, verify_contains='Explorer')
+            time.sleep(0.3)
+            # Clear search box query to trigger full collection rebuild and element recycling
+            send_keys('^a{BACKSPACE}')
+            time.sleep(0.3)
+
+        with session.step('tab_to_reloaded_card'):
+            # Return focus to shortcut card after collection rebuild
+            for _ in range(4):
+                send_keys('{TAB}')
+                time.sleep(0.1)
+            reloaded_card = settled(
+                UiaElement.get_focused,
+                lambda el: el is not None and (el.name or '') != '',
+                timeout=2.0,
+            )
+            assert reloaded_card.control_type_id != 50033 and (reloaded_card.name or '') != '', (
+                f'Focus failed to reach reloaded shortcut card: {reloaded_card.name!r}'
+            )
+
+        with session.step('open_context_menu_via_keyboard'):
+            # Press Shift+F10 to invoke ContextFlyout on the focused shortcut card
+            send_keys('+{F10}')
+            time.sleep(0.5)
+            # When ContextFlyout opens, the flyout item (ctype=50011 or 'Pin' in name) appears
+            menu_item = settled(
+                UiaElement.get_focused,
+                lambda el: el is not None and (el.control_type_id == 50011 or el.automation_id == 'PinMenuItem' or 'Pin' in (el.name or '')),
+                timeout=3.0,
+            )
+            session.log_event(
+                'context_menu_check',
+                f'Focused menu item: name={menu_item.name!r} aid={menu_item.automation_id!r} ctype={menu_item.control_type_id if menu_item else None}',
+            )
+            assert menu_item is not None and (
+                menu_item.control_type_id == 50011 or menu_item.automation_id == 'PinMenuItem' or 'Pin' in (menu_item.name or '')
+            ), (
+                f'Context menu failed to open on recycled shortcut card (ContextFlyout was lost after unload): '
+                f'got {menu_item.name!r} (ctype={menu_item.control_type_id if menu_item else None})'
+            )
+
+        with session.step('dismiss_context_menu'):
+            send_keys('{ESC}')
+            time.sleep(0.2)
